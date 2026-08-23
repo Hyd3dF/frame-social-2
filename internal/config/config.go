@@ -29,7 +29,7 @@ func Load() (Config, error) {
 	cfg := Config{
 		AccessTokenMinutes: intEnv("ACCESS_TOKEN_MINUTES", 15),
 		AppEnv:             env("APP_ENV", "development"),
-		HTTPAddr:           env("HTTP_ADDR", ":3000"),
+		HTTPAddr:           listenAddr(),
 		JWTSecret:          os.Getenv("JWT_SECRET"),
 		OTPMode:            env("OTP_MODE", "development"),
 		OTPPepper:          os.Getenv("OTP_PEPPER"),
@@ -72,6 +72,16 @@ func missingRequired(values map[string]string) []string {
 	}
 	sort.Strings(missing)
 	return missing
+}
+
+func listenAddr() string {
+	if value := os.Getenv("HTTP_ADDR"); value != "" {
+		return value
+	}
+	if port := os.Getenv("PORT"); port != "" {
+		return ":" + port
+	}
+	return ":3000"
 }
 
 func env(key, fallback string) string {

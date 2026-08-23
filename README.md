@@ -16,6 +16,7 @@ Bu depo hiçbir üretim anahtarı, parola veya veritabanı adresi içermez. Tüm
 | --- | --- |
 | `APP_ENV` | `development` veya `production` |
 | `HTTP_ADDR` | Dinlenecek adres; container için `:3000` |
+| `PORT` | Render tarafından sağlanan port; `HTTP_ADDR` yoksa otomatik kullanılır |
 | `PUBLIC_BASE_URL` | API'nin dışarıdan erişilen HTTPS adresi |
 | `SURREAL_URL` | Harici SurrealDB HTTPS adresi |
 | `SURREAL_NAMESPACE` | SurrealDB namespace |
@@ -55,6 +56,8 @@ curl http://127.0.0.1:3000/health
 docker build -t frame-social-api .
 docker run --rm -p 3000:3000 --env-file /secure/path/frame-social.env frame-social-api
 ```
+
+Render dağıtımında `PORT` değerini elle eklemeyin. Render bu değeri otomatik sağlar ve servis `0.0.0.0:$PORT` üzerinde dinler.
 
 Ortam dosyasını backend klasöründe veya Git deposunda tutmayın. Reverse proxy üzerinden yalnızca HTTPS yayınlayın; SurrealDB portunu internete doğrudan açmayın.
 

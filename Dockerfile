@@ -16,8 +16,7 @@ RUN apk add --no-cache ca-certificates tzdata \
 WORKDIR /app
 COPY --from=build --chown=app:app /out/api /app/api
 
-ENV HTTP_ADDR=:3000
-EXPOSE 3000
+EXPOSE 10000
 USER app
 
 ENTRYPOINT ["/app/api"]

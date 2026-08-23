@@ -48,10 +48,25 @@ func TestLoadAcceptsCompleteExternalConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadUsesRenderPort(t *testing.T) {
+	setValidEnvironment(t)
+	t.Setenv("HTTP_ADDR", "")
+	t.Setenv("PORT", "10000")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("expected valid configuration, got %v", err)
+	}
+	if cfg.HTTPAddr != ":10000" {
+		t.Fatalf("expected Render port, got %q", cfg.HTTPAddr)
+	}
+}
+
 func setValidEnvironment(t *testing.T) {
 	t.Helper()
 	t.Setenv("APP_ENV", "development")
 	t.Setenv("HTTP_ADDR", ":3000")
+	t.Setenv("PORT", "")
 	t.Setenv("JWT_SECRET", strings.Repeat("j", 32))
 	t.Setenv("OTP_MODE", "development")
 	t.Setenv("OTP_PEPPER", strings.Repeat("p", 32))
