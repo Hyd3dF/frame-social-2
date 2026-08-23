@@ -23,6 +23,7 @@ Bu depo hiçbir üretim anahtarı, parola veya veritabanı adresi içermez. Tüm
 | `SURREAL_DATABASE` | SurrealDB database |
 | `SURREAL_USERNAME` | Sınırlı yetkili backend kullanıcısı |
 | `SURREAL_PASSWORD` | Backend kullanıcısının parolası |
+| `SURREAL_PROXY_TOKEN` | SurrealDB HTTPS geçidinin güçlü erişim anahtarı |
 | `JWT_SECRET` | En az 32 karakterlik rastgele imzalama anahtarı |
 | `OTP_PEPPER` | En az 32 karakterlik, JWT anahtarından farklı rastgele değer |
 | `OTP_MODE` | Geliştirmede `development`; üretimde gerçek SMS sağlayıcı modu |

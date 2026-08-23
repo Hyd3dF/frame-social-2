@@ -21,7 +21,7 @@ func main() {
 		logger.Error("configuration failed", "error", err)
 		os.Exit(1)
 	}
-	db := database.New(cfg.SurrealURL, cfg.SurrealNamespace, cfg.SurrealDatabase, cfg.SurrealUsername, cfg.SurrealPassword)
+	db := database.New(cfg.SurrealURL, cfg.SurrealNamespace, cfg.SurrealDatabase, cfg.SurrealUsername, cfg.SurrealPassword, cfg.SurrealProxyToken)
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           api.New(cfg, db, logger),

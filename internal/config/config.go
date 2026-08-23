@@ -21,6 +21,7 @@ type Config struct {
 	SurrealDatabase    string
 	SurrealNamespace   string
 	SurrealPassword    string
+	SurrealProxyToken  string
 	SurrealURL         string
 	SurrealUsername    string
 }
@@ -38,18 +39,20 @@ func Load() (Config, error) {
 		SurrealDatabase:    os.Getenv("SURREAL_DATABASE"),
 		SurrealNamespace:   os.Getenv("SURREAL_NAMESPACE"),
 		SurrealPassword:    os.Getenv("SURREAL_PASSWORD"),
+		SurrealProxyToken:  os.Getenv("SURREAL_PROXY_TOKEN"),
 		SurrealURL:         os.Getenv("SURREAL_URL"),
 		SurrealUsername:    os.Getenv("SURREAL_USERNAME"),
 	}
 	missing := missingRequired(map[string]string{
-		"JWT_SECRET":        cfg.JWTSecret,
-		"OTP_PEPPER":        cfg.OTPPepper,
-		"PUBLIC_BASE_URL":   cfg.PublicBaseURL,
-		"SURREAL_DATABASE":  cfg.SurrealDatabase,
-		"SURREAL_NAMESPACE": cfg.SurrealNamespace,
-		"SURREAL_PASSWORD":  cfg.SurrealPassword,
-		"SURREAL_URL":       cfg.SurrealURL,
-		"SURREAL_USERNAME":  cfg.SurrealUsername,
+		"JWT_SECRET":          cfg.JWTSecret,
+		"OTP_PEPPER":          cfg.OTPPepper,
+		"PUBLIC_BASE_URL":     cfg.PublicBaseURL,
+		"SURREAL_DATABASE":    cfg.SurrealDatabase,
+		"SURREAL_NAMESPACE":   cfg.SurrealNamespace,
+		"SURREAL_PASSWORD":    cfg.SurrealPassword,
+		"SURREAL_PROXY_TOKEN": cfg.SurrealProxyToken,
+		"SURREAL_URL":         cfg.SurrealURL,
+		"SURREAL_USERNAME":    cfg.SurrealUsername,
 	})
 	if len(missing) > 0 {
 		return Config{}, fmt.Errorf("required environment variables are missing: %s", strings.Join(missing, ", "))

@@ -13,6 +13,7 @@ func TestLoadRequiresExternalSecretsAndDatabaseConfiguration(t *testing.T) {
 		"SURREAL_DATABASE",
 		"SURREAL_NAMESPACE",
 		"SURREAL_PASSWORD",
+		"SURREAL_PROXY_TOKEN",
 		"SURREAL_URL",
 		"SURREAL_USERNAME",
 	} {
@@ -74,6 +75,7 @@ func setValidEnvironment(t *testing.T) {
 	t.Setenv("SURREAL_DATABASE", "app")
 	t.Setenv("SURREAL_NAMESPACE", "example")
 	t.Setenv("SURREAL_PASSWORD", "test-password")
+	t.Setenv("SURREAL_PROXY_TOKEN", strings.Repeat("x", 64))
 	t.Setenv("SURREAL_URL", "https://surrealdb.example.com")
 	t.Setenv("SURREAL_USERNAME", "backend")
 }

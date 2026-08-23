@@ -13,13 +13,14 @@ import (
 )
 
 type Client struct {
-	database  string
-	http      *http.Client
-	namespace string
-	password  string
-	rpcURL    string
-	sequence  atomic.Uint64
-	username  string
+	database   string
+	http       *http.Client
+	namespace  string
+	password   string
+	proxyToken string
+	rpcURL     string
+	sequence   atomic.Uint64
+	username   string
 }
 
 type rpcRequest struct {
@@ -43,7 +44,7 @@ type statementResult struct {
 	Status string          `json:"status"`
 }
 
-func New(url, namespace, database, username, password string) *Client {
+func New(url, namespace, database, username, password, proxyToken string) *Client {
 	transport := &http.Transport{
 		MaxIdleConns:          64,
 		MaxIdleConnsPerHost:   32,
@@ -53,12 +54,13 @@ func New(url, namespace, database, username, password string) *Client {
 		ResponseHeaderTimeout: 8 * time.Second,
 	}
 	return &Client{
-		database:  database,
-		http:      &http.Client{Timeout: 10 * time.Second, Transport: transport},
-		namespace: namespace,
-		password:  password,
-		rpcURL:    strings.TrimRight(url, "/") + "/rpc",
-		username:  username,
+		database:   database,
+		http:       &http.Client{Timeout: 10 * time.Second, Transport: transport},
+		namespace:  namespace,
+		password:   password,
+		proxyToken: proxyToken,
+		rpcURL:     strings.TrimRight(url, "/") + "/rpc",
+		username:   username,
 	}
 }
 
@@ -77,6 +79,7 @@ func (c *Client) Query(ctx context.Context, sql string, vars map[string]any, des
 	req.Header.Set("Surreal-DB", c.database)
 	req.Header.Set("Surreal-Auth-NS", c.namespace)
 	req.Header.Set("Surreal-Auth-DB", c.database)
+	req.Header.Set("X-Surreal-Proxy-Token", c.proxyToken)
 	req.SetBasicAuth(c.username, c.password)
 	response, err := c.http.Do(req)
 	if err != nil {
