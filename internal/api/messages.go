@@ -125,7 +125,7 @@ func (s *Server) listConversations(w http.ResponseWriter, r *http.Request) {
 	var conversations []conversationView
 	err := s.db.Query(r.Context(), `
 SELECT <string>out.id AS id, <string>out.updated_at AS updatedAt,
-(SELECT { id: <string>in.id, fullName: in.full_name, displayName: in.display_name, username: in.username, avatarUrl: in.avatar.public_url, isPrivate: false } FROM conversation_member WHERE out = $parent.out AND in != type::record($account) LIMIT 1)[0] AS otherMember,
+(SELECT VALUE { id: <string>in.id, fullName: in.full_name, displayName: in.display_name, username: in.username, avatarUrl: in.avatar.public_url, isPrivate: false } FROM conversation_member WHERE out = $parent.out AND in != type::record($account) LIMIT 1)[0] AS otherMember,
 array::len(SELECT id FROM message_receipt WHERE recipient = type::record($account) AND status != 'read' AND message.conversation = $parent.out) AS unreadCount,
 IF out.last_message IS NONE THEN NONE ELSE {
  id: <string>out.last_message.id, clientId: out.last_message.client_id,
@@ -186,7 +186,7 @@ array::len(SELECT id FROM saved_message WHERE in = type::record($account) AND ou
 (SELECT VALUE status FROM message_receipt WHERE message = $parent.id AND recipient != type::record($account) LIMIT 1)[0] ?? 'sent' AS status,
 (SELECT emoji, 1 AS count, in = type::record($account) AS mine
  FROM message_reaction WHERE out = $parent.id) AS reactions,
-(SELECT { id: <string>in.id, senderId: <string>in.sender, body: in.body } FROM message_reply WHERE out = $parent.id LIMIT 1)[0] AS replyTo
+(SELECT VALUE { id: <string>in.id, senderId: <string>in.sender, body: in.body } FROM message_reply WHERE out = $parent.id LIMIT 1)[0] AS replyTo
 FROM message WHERE conversation = type::record($conversation) AND created_at < <datetime>$before
 AND deleted_at IS NONE ORDER BY createdAt DESC LIMIT $limit;`, map[string]any{
 		"account": accountID(r), "conversation": conversation, "before": cursor, "limit": limit,
