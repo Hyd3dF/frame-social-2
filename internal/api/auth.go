@@ -59,6 +59,12 @@ type authResponse struct {
 	Tokens  security.Tokens `json:"tokens"`
 }
 
+type refreshSession struct {
+	Account   string `json:"account"`
+	ExpiresAt string `json:"expiresAt"`
+	ID        string `json:"id"`
+}
+
 func (s *Server) requestSignup(w http.ResponseWriter, r *http.Request) {
 	var input signupRequest
 	if !decode(w, r, &input) {
@@ -313,14 +319,22 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "rotate refresh token", err)
 		return
 	}
-	var sessions []struct {
-		Account   string `json:"account"`
-		ExpiresAt string `json:"expiresAt"`
-	}
-	err = s.db.Query(r.Context(), `UPDATE auth_session SET
-refresh_token_hash = $new_hash, last_used_at = time::now()
+	var sessions []refreshSession
+	err = s.db.Query(r.Context(), `
+BEGIN TRANSACTION;
+LET $sessions = SELECT VALUE {
+ id: <string>id,
+ account: <string>account,
+ expiresAt: <string>expires_at
+} FROM auth_session
 WHERE refresh_token_hash = $old_hash AND revoked_at IS NONE AND expires_at > time::now()
-RETURN { account: <string>account, expiresAt: <string>expires_at };`, map[string]any{
+LIMIT 1;
+IF array::len($sessions) > 0 {
+ UPDATE type::record($sessions[0].id) SET
+  refresh_token_hash = $new_hash, last_used_at = time::now();
+};
+COMMIT TRANSACTION;
+RETURN $sessions;`, map[string]any{
 		"old_hash": security.TokenHash(input.RefreshToken), "new_hash": security.TokenHash(newRefresh),
 	}, &sessions)
 	if err != nil {
