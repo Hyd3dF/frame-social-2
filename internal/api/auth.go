@@ -3,16 +3,11 @@ package api
 import (
 	"context"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
-	"github.com/Hyd3dF/frame-social-2/internal/httpx"
-	"github.com/Hyd3dF/frame-social-2/internal/phone"
 	"github.com/Hyd3dF/frame-social-2/internal/security"
 )
-
-var usernamePattern = regexp.MustCompile(`^[a-z0-9_]{3,30}$`)
 
 type authRequestResponse struct {
 	ChallengeID string `json:"challengeId"`
@@ -66,19 +61,19 @@ type authResponse struct {
 
 func (s *Server) requestSignup(w http.ResponseWriter, r *http.Request) {
 	var input signupRequest
-	if !httpx.Decode(w, r, &input) {
+	if !decode(w, r, &input) {
 		return
 	}
 	input.FullName = strings.TrimSpace(input.FullName)
 	input.DisplayName = strings.TrimSpace(input.DisplayName)
 	input.Username = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(input.Username, "@")))
 	if len([]rune(input.FullName)) < 2 || len([]rune(input.FullName)) > 80 || len([]rune(input.DisplayName)) < 2 || len([]rune(input.DisplayName)) > 50 || !usernamePattern.MatchString(input.Username) {
-		httpx.Error(w, http.StatusBadRequest, "invalid_profile", "Ad, görünen ad veya kullanıcı adı geçersiz.")
+		respondError(w, http.StatusBadRequest, "invalid_profile", "Ad, görünen ad veya kullanıcı adı geçersiz.")
 		return
 	}
-	phoneE164, err := phone.Normalize(input.Phone, input.CountryCode)
+	phoneE164, err := normalizePhone(input.Phone, input.CountryCode)
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid_phone", "Geçerli bir telefon numarası girin.")
+		respondError(w, http.StatusBadRequest, "invalid_phone", "Geçerli bir telefon numarası girin.")
 		return
 	}
 	var conflicts []recordID
@@ -90,7 +85,7 @@ WHERE phone_e164 = $phone OR username = $username LIMIT 1;`, map[string]any{"pho
 		return
 	}
 	if len(conflicts) != 0 {
-		httpx.Error(w, http.StatusConflict, "account_exists", "Telefon numarası veya kullanıcı adı zaten kullanılıyor.")
+		respondError(w, http.StatusConflict, "account_exists", "Telefon numarası veya kullanıcı adı zaten kullanılıyor.")
 		return
 	}
 	code, err := security.OTP()
@@ -120,17 +115,17 @@ RETURN [{ id: <string>$challenge.id }];`, map[string]any{
 		response.DebugCode = code
 	} else {
 		s.log.Error("SMS provider is not configured", "mode", s.cfg.OTPMode)
-		httpx.Error(w, http.StatusServiceUnavailable, "sms_unavailable", "SMS servisi henüz yapılandırılmadı.")
+		respondError(w, http.StatusServiceUnavailable, "sms_unavailable", "SMS servisi henüz yapılandırılmadı.")
 		return
 	}
-	httpx.JSON(w, http.StatusCreated, response)
+	respondJSON(w, http.StatusCreated, response)
 }
 
 func (s *Server) verifySignup(w http.ResponseWriter, r *http.Request) {
 	var input verifyRequest
-	if !httpx.Decode(w, r, &input) || !validVerifyRequest(input) || !validRecord(input.ChallengeID, "signup_challenge") {
+	if !decode(w, r, &input) || !validVerifyRequest(input) || !validRecord(input.ChallengeID, "signup_challenge") {
 		if input.ChallengeID != "" {
-			httpx.Error(w, http.StatusBadRequest, "invalid_request", "Doğrulama bilgileri geçersiz.")
+			respondError(w, http.StatusBadRequest, "invalid_request", "Doğrulama bilgileri geçersiz.")
 		}
 		return
 	}
@@ -155,13 +150,13 @@ WHERE consumed_at IS NONE AND expires_at > time::now() LIMIT 1;`, map[string]any
 		return
 	}
 	if len(challenges) == 0 || challenges[0].AttemptCount >= 5 {
-		httpx.Error(w, http.StatusGone, "challenge_expired", "Doğrulama kodunun süresi dolmuş.")
+		respondError(w, http.StatusGone, "challenge_expired", "Doğrulama kodunun süresi dolmuş.")
 		return
 	}
 	challenge := challenges[0]
 	if !security.VerifyOTP(s.cfg.OTPPepper, challenge.Phone, input.Code, challenge.OTPHash) {
 		_ = s.db.Query(r.Context(), `UPDATE type::record($challenge) SET attempt_count += 1;`, map[string]any{"challenge": input.ChallengeID}, nil)
-		httpx.Error(w, http.StatusUnauthorized, "invalid_code", "Doğrulama kodu yanlış.")
+		respondError(w, http.StatusUnauthorized, "invalid_code", "Doğrulama kodu yanlış.")
 		return
 	}
 	var accounts []accountAuth
@@ -189,17 +184,17 @@ FROM $account;`, map[string]any{
 		s.databaseError(w, "create auth session", err)
 		return
 	}
-	httpx.JSON(w, http.StatusCreated, authResponse{Account: accounts[0], Tokens: tokens})
+	respondJSON(w, http.StatusCreated, authResponse{Account: accounts[0], Tokens: tokens})
 }
 
 func (s *Server) requestLogin(w http.ResponseWriter, r *http.Request) {
 	var input loginRequest
-	if !httpx.Decode(w, r, &input) {
+	if !decode(w, r, &input) {
 		return
 	}
-	phoneE164, err := phone.Normalize(input.Phone, input.CountryCode)
+	phoneE164, err := normalizePhone(input.Phone, input.CountryCode)
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid_phone", "Geçerli bir telefon numarası girin.")
+		respondError(w, http.StatusBadRequest, "invalid_phone", "Geçerli bir telefon numarası girin.")
 		return
 	}
 	var accounts []recordID
@@ -209,7 +204,7 @@ func (s *Server) requestLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(accounts) == 0 {
-		httpx.Error(w, http.StatusNotFound, "account_not_found", "Bu telefon numarasıyla kayıtlı hesap bulunamadı.")
+		respondError(w, http.StatusNotFound, "account_not_found", "Bu telefon numarasıyla kayıtlı hesap bulunamadı.")
 		return
 	}
 	code, err := security.OTP()
@@ -231,17 +226,17 @@ RETURN [{ id: <string>$challenge.id }];`, map[string]any{"account": accounts[0].
 	if s.cfg.OTPMode == "development" {
 		response.DebugCode = code
 	} else {
-		httpx.Error(w, http.StatusServiceUnavailable, "sms_unavailable", "SMS servisi henüz yapılandırılmadı.")
+		respondError(w, http.StatusServiceUnavailable, "sms_unavailable", "SMS servisi henüz yapılandırılmadı.")
 		return
 	}
-	httpx.JSON(w, http.StatusCreated, response)
+	respondJSON(w, http.StatusCreated, response)
 }
 
 func (s *Server) verifyLogin(w http.ResponseWriter, r *http.Request) {
 	var input verifyRequest
-	if !httpx.Decode(w, r, &input) || !validVerifyRequest(input) || !validRecord(input.ChallengeID, "login_challenge") {
+	if !decode(w, r, &input) || !validVerifyRequest(input) || !validRecord(input.ChallengeID, "login_challenge") {
 		if input.ChallengeID != "" {
-			httpx.Error(w, http.StatusBadRequest, "invalid_request", "Doğrulama bilgileri geçersiz.")
+			respondError(w, http.StatusBadRequest, "invalid_request", "Doğrulama bilgileri geçersiz.")
 		}
 		return
 	}
@@ -259,13 +254,13 @@ WHERE consumed_at IS NONE AND expires_at > time::now() LIMIT 1;`, map[string]any
 		return
 	}
 	if len(challenges) == 0 || challenges[0].AttemptCount >= 5 {
-		httpx.Error(w, http.StatusGone, "challenge_expired", "Doğrulama kodunun süresi dolmuş.")
+		respondError(w, http.StatusGone, "challenge_expired", "Doğrulama kodunun süresi dolmuş.")
 		return
 	}
 	challenge := challenges[0]
 	if !security.VerifyOTP(s.cfg.OTPPepper, challenge.Phone, input.Code, challenge.OTPHash) {
 		_ = s.db.Query(r.Context(), `UPDATE type::record($challenge) SET attempt_count += 1;`, map[string]any{"challenge": input.ChallengeID}, nil)
-		httpx.Error(w, http.StatusUnauthorized, "invalid_code", "Doğrulama kodu yanlış.")
+		respondError(w, http.StatusUnauthorized, "invalid_code", "Doğrulama kodu yanlış.")
 		return
 	}
 	var accounts []accountAuth
@@ -282,7 +277,7 @@ FROM type::record($account) WHERE status = 'active';`, map[string]any{"challenge
 		s.databaseError(w, "create login session", err)
 		return
 	}
-	httpx.JSON(w, http.StatusOK, authResponse{Account: accounts[0], Tokens: tokens})
+	respondJSON(w, http.StatusOK, authResponse{Account: accounts[0], Tokens: tokens})
 }
 
 func (s *Server) createSession(ctx context.Context, account string, input verifyRequest) (security.Tokens, error) {
@@ -310,7 +305,7 @@ func (s *Server) createSession(ctx context.Context, account string, input verify
 
 func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 	var input tokenRequest
-	if !httpx.Decode(w, r, &input) || input.RefreshToken == "" {
+	if !decode(w, r, &input) || input.RefreshToken == "" {
 		return
 	}
 	newRefresh, err := security.RefreshToken()
@@ -333,7 +328,7 @@ RETURN { account: <string>account, expiresAt: <string>expires_at };`, map[string
 		return
 	}
 	if len(sessions) == 0 {
-		httpx.Error(w, http.StatusUnauthorized, "invalid_refresh_token", "Oturum yenileme anahtarı geçersiz.")
+		respondError(w, http.StatusUnauthorized, "invalid_refresh_token", "Oturum yenileme anahtarı geçersiz.")
 		return
 	}
 	access, err := security.AccessToken(s.cfg.JWTSecret, sessions[0].Account, s.cfg.AccessTokenMinutes)
@@ -341,12 +336,12 @@ RETURN { account: <string>account, expiresAt: <string>expires_at };`, map[string
 		s.internalError(w, "create access token", err)
 		return
 	}
-	httpx.JSON(w, http.StatusOK, security.Tokens{AccessToken: access, RefreshToken: newRefresh, RefreshTokenExpiresAt: sessions[0].ExpiresAt})
+	respondJSON(w, http.StatusOK, security.Tokens{AccessToken: access, RefreshToken: newRefresh, RefreshTokenExpiresAt: sessions[0].ExpiresAt})
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	var input tokenRequest
-	if !httpx.Decode(w, r, &input) || input.RefreshToken == "" {
+	if !decode(w, r, &input) || input.RefreshToken == "" {
 		return
 	}
 	if err := s.db.Query(r.Context(), `UPDATE auth_session SET revoked_at = time::now()
@@ -357,24 +352,12 @@ WHERE refresh_token_hash = $hash AND revoked_at IS NONE;`, map[string]any{"hash"
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func validVerifyRequest(input verifyRequest) bool {
-	return len(input.Code) == 6 && len(strings.TrimSpace(input.DeviceID)) >= 8 && len(input.DeviceID) <= 200 && (input.Platform == "ios" || input.Platform == "android")
-}
-
-func deviceName(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "Unknown device"
-	}
-	return value
-}
-
 func (s *Server) databaseError(w http.ResponseWriter, operation string, err error) {
 	s.log.Error("database operation failed", "operation", operation, "error", err)
-	httpx.Error(w, http.StatusInternalServerError, "database_error", "İşlem tamamlanamadı.")
+	respondError(w, http.StatusInternalServerError, "database_error", "İşlem tamamlanamadı.")
 }
 
 func (s *Server) internalError(w http.ResponseWriter, operation string, err error) {
 	s.log.Error("internal operation failed", "operation", operation, "error", err)
-	httpx.Error(w, http.StatusInternalServerError, "internal_error", "Beklenmeyen bir hata oluştu.")
+	respondError(w, http.StatusInternalServerError, "internal_error", "Beklenmeyen bir hata oluştu.")
 }

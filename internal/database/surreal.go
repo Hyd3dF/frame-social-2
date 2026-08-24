@@ -51,11 +51,11 @@ func New(url, namespace, database, username, password, proxyToken string) *Clien
 		MaxConnsPerHost:       64,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   5 * time.Second,
-		ResponseHeaderTimeout: 8 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
 	}
 	return &Client{
 		database:   database,
-		http:       &http.Client{Timeout: 10 * time.Second, Transport: transport},
+		http:       &http.Client{Timeout: 30 * time.Second, Transport: transport},
 		namespace:  namespace,
 		password:   password,
 		proxyToken: proxyToken,
@@ -77,8 +77,6 @@ func (c *Client) Query(ctx context.Context, sql string, vars map[string]any, des
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Surreal-NS", c.namespace)
 	req.Header.Set("Surreal-DB", c.database)
-	req.Header.Set("Surreal-Auth-NS", c.namespace)
-	req.Header.Set("Surreal-Auth-DB", c.database)
 	req.Header.Set("X-Surreal-Proxy-Token", c.proxyToken)
 	req.SetBasicAuth(c.username, c.password)
 	response, err := c.http.Do(req)

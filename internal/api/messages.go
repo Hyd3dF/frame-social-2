@@ -5,12 +5,12 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
-	"github.com/Hyd3dF/frame-social-2/internal/httpx"
 	"github.com/Hyd3dF/frame-social-2/internal/security"
 )
 
@@ -52,15 +52,15 @@ func (s *Server) createDirectConversation(w http.ResponseWriter, r *http.Request
 	var input struct {
 		UserID string `json:"userId"`
 	}
-	if !httpx.Decode(w, r, &input) || !validRecord(input.UserID, "account") {
+	if !decode(w, r, &input) || !validRecord(input.UserID, "account") {
 		if input.UserID != "" {
-			httpx.Error(w, http.StatusBadRequest, "invalid_user", "Kullanıcı geçersiz.")
+			respondError(w, http.StatusBadRequest, "invalid_user", "Kullanıcı geçersiz.")
 		}
 		return
 	}
 	actor := accountID(r)
 	if actor == input.UserID {
-		httpx.Error(w, http.StatusBadRequest, "self_conversation", "Kendinizle sohbet başlatamazsınız.")
+		respondError(w, http.StatusBadRequest, "self_conversation", "Kendinizle sohbet başlatamazsınız.")
 		return
 	}
 	pair := security.PairKey(actor, input.UserID)
@@ -81,11 +81,11 @@ permission: (SELECT VALUE message_permission FROM privacy_setting WHERE account 
 		return
 	}
 	if len(decision) == 0 || !decision[0].Exists {
-		httpx.Error(w, http.StatusNotFound, "user_not_found", "Kullanıcı bulunamadı.")
+		respondError(w, http.StatusNotFound, "user_not_found", "Kullanıcı bulunamadı.")
 		return
 	}
 	if decision[0].Blocked || decision[0].Permission == "nobody" || (decision[0].Permission == "friends" && !decision[0].IsFriend) {
-		httpx.Error(w, http.StatusForbidden, "messages_not_allowed", "Bu kullanıcı yalnızca izin verdiği kişilerden mesaj alıyor.")
+		respondError(w, http.StatusForbidden, "messages_not_allowed", "Bu kullanıcı yalnızca izin verdiği kişilerden mesaj alıyor.")
 		return
 	}
 	conversationID, err := s.ensureDirectConversation(r.Context(), actor, input.UserID, pair)
@@ -93,8 +93,9 @@ permission: (SELECT VALUE message_permission FROM privacy_setting WHERE account 
 		s.databaseError(w, "create direct conversation", err)
 		return
 	}
+	s.members.Set(conversationID, []string{actor, input.UserID})
 	s.events.publish([]string{actor, input.UserID}, conversationID)
-	httpx.JSON(w, http.StatusCreated, recordID{ID: conversationID})
+	respondJSON(w, http.StatusCreated, recordID{ID: conversationID})
 }
 
 func (s *Server) ensureDirectConversation(ctx context.Context, actor, target, pair string) (string, error) {
@@ -124,14 +125,7 @@ func (s *Server) listConversations(w http.ResponseWriter, r *http.Request) {
 	var conversations []conversationView
 	err := s.db.Query(r.Context(), `
 SELECT <string>out.id AS id, <string>out.updated_at AS updatedAt,
-{
- id: <string>(SELECT VALUE in FROM conversation_member WHERE out = $parent.out AND in != type::record($account) LIMIT 1)[0].id,
- fullName: (SELECT VALUE in.full_name FROM conversation_member WHERE out = $parent.out AND in != type::record($account) LIMIT 1)[0],
- displayName: (SELECT VALUE in.display_name FROM conversation_member WHERE out = $parent.out AND in != type::record($account) LIMIT 1)[0],
- username: (SELECT VALUE in.username FROM conversation_member WHERE out = $parent.out AND in != type::record($account) LIMIT 1)[0],
- avatarUrl: (SELECT VALUE in.avatar.public_url FROM conversation_member WHERE out = $parent.out AND in != type::record($account) LIMIT 1)[0],
- isPrivate: false
-} AS otherMember,
+(SELECT { id: <string>in.id, fullName: in.full_name, displayName: in.display_name, username: in.username, avatarUrl: in.avatar.public_url, isPrivate: false } FROM conversation_member WHERE out = $parent.out AND in != type::record($account) LIMIT 1)[0] AS otherMember,
 array::len(SELECT id FROM message_receipt WHERE recipient = type::record($account) AND status != 'read' AND message.conversation = $parent.out) AS unreadCount,
 IF out.last_message IS NONE THEN NONE ELSE {
  id: <string>out.last_message.id, clientId: out.last_message.client_id,
@@ -146,13 +140,13 @@ ORDER BY updatedAt DESC LIMIT 100;`, map[string]any{"account": accountID(r)}, &c
 		s.databaseError(w, "list conversations", err)
 		return
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"conversations": conversations})
+	respondJSON(w, http.StatusOK, map[string]any{"conversations": conversations})
 }
 
 func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
 	conversation := "conversation:" + r.PathValue("id")
 	if !validRecord(conversation, "conversation") {
-		httpx.Error(w, http.StatusBadRequest, "invalid_conversation", "Sohbet geçersiz.")
+		respondError(w, http.StatusBadRequest, "invalid_conversation", "Sohbet geçersiz.")
 		return
 	}
 	limit := 50
@@ -162,18 +156,30 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
 	cursor := r.URL.Query().Get("before")
 	if cursor != "" {
 		if _, err := time.Parse(time.RFC3339Nano, cursor); err != nil {
-			httpx.Error(w, http.StatusBadRequest, "invalid_cursor", "Sayfalama bilgisi geçersiz.")
+			respondError(w, http.StatusBadRequest, "invalid_cursor", "Sayfalama bilgisi geçersiz.")
 			return
 		}
 	} else {
 		cursor = time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano)
 	}
-	if !s.isMember(r, conversation) {
-		httpx.Error(w, http.StatusForbidden, "not_a_member", "Bu sohbete erişiminiz yok.")
+	members, err := s.getMembersCached(r.Context(), conversation)
+	if err != nil {
+		s.databaseError(w, "list messages members", err)
+		return
+	}
+	isMem := false
+	for _, m := range members {
+		if m == accountID(r) {
+			isMem = true
+			break
+		}
+	}
+	if !isMem {
+		respondError(w, http.StatusForbidden, "not_a_member", "Bu sohbete erişiminiz yok.")
 		return
 	}
 	var messages []messageView
-	err := s.db.Query(r.Context(), `SELECT <string>id AS id, client_id AS clientId,
+	err = s.db.Query(r.Context(), `SELECT <string>id AS id, client_id AS clientId,
 <string>conversation AS conversationId, <string>sender AS senderId, body, kind,
 <string>created_at AS createdAt,
 array::len(SELECT id FROM saved_message WHERE in = type::record($account) AND out = $parent.id) > 0 AS saved,
@@ -207,18 +213,59 @@ LIMIT 1;`, map[string]any{"account": accountID(r), "conversation": conversation}
 			}
 		}
 	}
+	if pend := s.pending.List(conversation); len(pend) > 0 {
+		beforeTime, _ := time.Parse(time.RFC3339Nano, cursor)
+		filtered := make([]messageView, 0, len(pend))
+		for _, p := range pend {
+			if t, err := time.Parse(time.RFC3339Nano, p.CreatedAt); err == nil && t.Before(beforeTime) {
+				exists := false
+				for _, m := range messages {
+					if m.ID == p.ID || (p.ClientID != "" && m.ClientID == p.ClientID) {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					filtered = append(filtered, p)
+				}
+			}
+		}
+		if len(filtered) > 0 {
+			messages = append(messages, filtered...)
+			sort.Slice(messages, func(i, j int) bool { return messages[i].CreatedAt > messages[j].CreatedAt })
+			if len(messages) > limit {
+				messages = messages[:limit]
+			}
+		}
+	}
 	var nextCursor *string
 	if len(messages) == limit {
 		value := messages[len(messages)-1].CreatedAt
 		nextCursor = &value
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"messages": messages, "nextCursor": nextCursor})
+	respondJSON(w, http.StatusOK, map[string]any{"messages": messages, "nextCursor": nextCursor})
+}
+
+func (s *Server) getMembersCached(ctx context.Context, conversation string) ([]string, error) {
+	if members, ok := s.members.Get(conversation); ok {
+		return members, nil
+	}
+	var ids []recordID
+	if err := s.db.Query(ctx, `SELECT <string>in AS id FROM conversation_member WHERE out = type::record($conversation) AND left_at IS NONE;`, map[string]any{"conversation": conversation}, &ids); err != nil {
+		return nil, err
+	}
+	members := make([]string, 0, len(ids))
+	for _, v := range ids {
+		members = append(members, v.ID)
+	}
+	s.members.Set(conversation, members)
+	return members, nil
 }
 
 func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 	conversation := "conversation:" + r.PathValue("id")
-	if !validRecord(conversation, "conversation") || !s.isMember(r, conversation) {
-		httpx.Error(w, http.StatusForbidden, "not_a_member", "Bu sohbete mesaj gönderemezsiniz.")
+	if !validRecord(conversation, "conversation") {
+		respondError(w, http.StatusForbidden, "not_a_member", "Bu sohbete mesaj gönderemezsiniz.")
 		return
 	}
 	var input struct {
@@ -226,50 +273,54 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 		ClientID  string `json:"clientId"`
 		ReplyToID string `json:"replyToId"`
 	}
-	if !httpx.Decode(w, r, &input) {
+	if !decode(w, r, &input) {
 		return
 	}
 	input.Body = cleanMessageBody(input.Body)
 	if input.Body == "" || len([]rune(input.Body)) > 4000 || len(input.ClientID) < 8 || len(input.ClientID) > 100 {
-		httpx.Error(w, http.StatusBadRequest, "invalid_message", "Mesaj boş veya çok uzun.")
+		respondError(w, http.StatusBadRequest, "invalid_message", "Mesaj boş veya çok uzun.")
 		return
 	}
 	if input.ReplyToID != "" && !validRecord(input.ReplyToID, "message") {
-		httpx.Error(w, http.StatusBadRequest, "invalid_reply", "Yanıtlanan mesaj geçersiz.")
+		respondError(w, http.StatusBadRequest, "invalid_reply", "Yanıtlanan mesaj geçersiz.")
 		return
 	}
-	var result []messageView
-	err := s.db.Query(r.Context(), `
-LET $message = CREATE ONLY message CONTENT {
- conversation: type::record($conversation), sender: type::record($sender),
- client_id: $client_id, body: $body, kind: 'text'
-};
-IF $has_reply {
- LET $original = SELECT * FROM type::record($reply_to) WHERE conversation = type::record($conversation) LIMIT 1;
- IF array::len($original) > 0 {
-  LET $original_record = $original[0];
-  RELATE $original_record->message_reply->$message CONTENT { replied_by: type::record($sender) };
- };
-};
-LET $recipients = SELECT VALUE in FROM conversation_member
- WHERE out = type::record($conversation) AND in != type::record($sender) AND left_at IS NONE;
-FOR $recipient IN $recipients {
- CREATE message_receipt CONTENT { message: $message.id, recipient: $recipient, status: 'sent' };
-};
-UPDATE type::record($conversation) SET last_message = $message.id, updated_at = time::now();
-RETURN [{ id: <string>$message.id, clientId: $message.client_id,
-conversationId: <string>$message.conversation, senderId: <string>$message.sender,
-body: $message.body, kind: $message.kind, createdAt: <string>$message.created_at,
-status: 'sent', saved: false, reactions: [], replyTo: NONE }];`, map[string]any{
-		"conversation": conversation, "sender": accountID(r), "client_id": input.ClientID,
-		"body": input.Body, "reply_to": input.ReplyToID, "has_reply": input.ReplyToID != "",
-	}, &result)
-	if err != nil || len(result) == 0 {
-		s.databaseError(w, "send message", err)
+	acct := accountID(r)
+	members, err := s.getMembersCached(r.Context(), conversation)
+	if err != nil {
+		s.databaseError(w, "send message members", err)
 		return
 	}
-	s.publishConversation(r.Context(), conversation)
-	httpx.JSON(w, http.StatusCreated, result[0])
+	isMember := false
+	for _, m := range members {
+		if m == acct {
+			isMember = true
+			break
+		}
+	}
+	if !isMember {
+		respondError(w, http.StatusForbidden, "not_a_member", "Bu sohbete mesaj gönderemezsiniz.")
+		return
+	}
+	job := newPersistJob(conversation, acct, input.Body, input.ClientID, input.ReplyToID)
+	view := messageView{
+		ID:           job.messageID,
+		ClientID:     job.clientID,
+		Conversation: job.conversation,
+		SenderID:     job.sender,
+		Body:         &job.body,
+		Kind:         "text",
+		CreatedAt:    job.createdAt.Format(time.RFC3339Nano),
+		Status:       "sent",
+		Reactions:    []reactionView{},
+	}
+	if input.ReplyToID != "" {
+		view.ReplyTo = &replyView{ID: input.ReplyToID}
+	}
+	s.pending.Append(conversation, view)
+	s.events.publish(members, conversation)
+	s.persist.enqueue(job)
+	respondJSON(w, http.StatusCreated, view)
 }
 
 func cleanMessageBody(value string) string {
@@ -298,7 +349,7 @@ func (s *Server) deliverConversation(w http.ResponseWriter, r *http.Request) {
 func (s *Server) updateConversationReceipt(w http.ResponseWriter, r *http.Request, status string) {
 	conversation := "conversation:" + r.PathValue("id")
 	if !validRecord(conversation, "conversation") || !s.isMember(r, conversation) {
-		httpx.Error(w, http.StatusForbidden, "not_a_member", "Bu sohbete erişiminiz yok.")
+		respondError(w, http.StatusForbidden, "not_a_member", "Bu sohbete erişiminiz yok.")
 		return
 	}
 	var pending []recordID
@@ -339,11 +390,11 @@ func (s *Server) putReaction(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Emoji string `json:"emoji"`
 	}
-	if !httpx.Decode(w, r, &input) || !validRecord(message, "message") || len([]rune(input.Emoji)) < 1 || len([]rune(input.Emoji)) > 8 {
+	if !decode(w, r, &input) || !validRecord(message, "message") || len([]rune(input.Emoji)) < 1 || len([]rune(input.Emoji)) > 8 {
 		return
 	}
 	if !s.canAccessMessage(r, message) {
-		httpx.Error(w, http.StatusForbidden, "forbidden", "Mesaja erişiminiz yok.")
+		respondError(w, http.StatusForbidden, "forbidden", "Mesaja erişiminiz yok.")
 		return
 	}
 	err := s.db.Query(r.Context(), `IF array::len(SELECT id FROM message_reaction WHERE in = type::record($account) AND out = type::record($message) AND emoji = $emoji) = 0 {
@@ -361,7 +412,11 @@ func (s *Server) deleteReaction(w http.ResponseWriter, r *http.Request) {
 	message := "message:" + r.PathValue("id")
 	emoji, _ := url.PathUnescape(r.PathValue("emoji"))
 	if !validRecord(message, "message") {
-		httpx.Error(w, http.StatusBadRequest, "invalid_message", "Mesaj geçersiz.")
+		respondError(w, http.StatusBadRequest, "invalid_message", "Mesaj geçersiz.")
+		return
+	}
+	if !s.canAccessMessage(r, message) {
+		respondError(w, http.StatusForbidden, "forbidden", "Mesaja erişiminiz yok.")
 		return
 	}
 	err := s.db.Query(r.Context(), `DELETE message_reaction WHERE in = type::record($account) AND out = type::record($message) AND emoji = $emoji;`, map[string]any{"account": accountID(r), "message": message, "emoji": emoji}, nil)
@@ -375,7 +430,7 @@ func (s *Server) deleteReaction(w http.ResponseWriter, r *http.Request) {
 func (s *Server) saveMessage(w http.ResponseWriter, r *http.Request) {
 	message := "message:" + r.PathValue("id")
 	if !validRecord(message, "message") || !s.canAccessMessage(r, message) {
-		httpx.Error(w, http.StatusForbidden, "forbidden", "Mesaja erişiminiz yok.")
+		respondError(w, http.StatusForbidden, "forbidden", "Mesaja erişiminiz yok.")
 		return
 	}
 	err := s.db.Query(r.Context(), `IF array::len(SELECT id FROM saved_message WHERE in = type::record($account) AND out = type::record($message)) = 0 {
@@ -391,6 +446,10 @@ RELATE $account_record->saved_message->$message_record;
 
 func (s *Server) unsaveMessage(w http.ResponseWriter, r *http.Request) {
 	message := "message:" + r.PathValue("id")
+	if !validRecord(message, "message") || !s.canAccessMessage(r, message) {
+		respondError(w, http.StatusForbidden, "forbidden", "Mesaja erişiminiz yok.")
+		return
+	}
 	err := s.db.Query(r.Context(), `DELETE saved_message WHERE in = type::record($account) AND out = type::record($message);`, map[string]any{"account": accountID(r), "message": message}, nil)
 	if err != nil {
 		s.databaseError(w, "unsave message", err)
@@ -401,10 +460,14 @@ func (s *Server) unsaveMessage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) updateReceipt(w http.ResponseWriter, r *http.Request) {
 	message := "message:" + r.PathValue("id")
+	if !validRecord(message, "message") || !s.canAccessMessage(r, message) {
+		respondError(w, http.StatusForbidden, "forbidden", "Mesaja erişiminiz yok.")
+		return
+	}
 	var input struct {
 		Status string `json:"status"`
 	}
-	if !httpx.Decode(w, r, &input) || (input.Status != "delivered" && input.Status != "read") {
+	if !decode(w, r, &input) || (input.Status != "delivered" && input.Status != "read") {
 		return
 	}
 	set := "status = 'delivered', delivered_at = time::now(), updated_at = time::now()"

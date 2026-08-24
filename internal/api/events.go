@@ -2,12 +2,11 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
-
-	"github.com/Hyd3dF/frame-social-2/internal/httpx"
 )
 
 type accountEventState struct {
@@ -98,7 +97,7 @@ func (b *messageEventBroker) state(account string) *accountEventState {
 func (s *Server) messageEvents(w http.ResponseWriter, r *http.Request) {
 	after, err := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
 	if err != nil && r.URL.Query().Get("after") != "" {
-		httpx.Error(w, http.StatusBadRequest, "invalid_event_cursor", "Senkronizasyon bilgisi geçersiz.")
+		respondError(w, http.StatusBadRequest, "invalid_event_cursor", "Senkronizasyon bilgisi geçersiz.")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
@@ -107,10 +106,49 @@ func (s *Server) messageEvents(w http.ResponseWriter, r *http.Request) {
 	if !connected && r.Context().Err() != nil {
 		return
 	}
-	httpx.JSON(w, http.StatusOK, view)
+	respondJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) messageEventsStream(w http.ResponseWriter, r *http.Request) {
+	after, err := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
+	if err != nil && r.URL.Query().Get("after") != "" {
+		respondError(w, http.StatusBadRequest, "invalid_event_cursor", "Senkronizasyon bilgisi geçersiz.")
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		respondError(w, http.StatusInternalServerError, "internal_error", "Streaming not supported.")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	acct := accountID(r)
+	for {
+		ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+		view, connected := s.events.wait(ctx, acct, after)
+		cancel()
+		if !connected && r.Context().Err() != nil {
+			return
+		}
+		data, _ := json.Marshal(view)
+		_, _ = w.Write([]byte("data: "))
+		_, _ = w.Write(data)
+		_, _ = w.Write([]byte("\n\n"))
+		flusher.Flush()
+		after = view.Version
+		if view.Resync {
+			return
+		}
+	}
 }
 
 func (s *Server) publishConversation(ctx context.Context, conversation string) {
+	if members, ok := s.members.Get(conversation); ok {
+		s.events.publish(members, conversation)
+		return
+	}
 	var members []recordID
 	if err := s.db.Query(ctx, `SELECT <string>in AS id FROM conversation_member
 WHERE out = type::record($conversation) AND left_at IS NONE;`, map[string]any{"conversation": conversation}, &members); err != nil {
@@ -121,5 +159,6 @@ WHERE out = type::record($conversation) AND left_at IS NONE;`, map[string]any{"c
 	for _, member := range members {
 		accounts = append(accounts, member.ID)
 	}
+	s.members.Set(conversation, accounts)
 	s.events.publish(accounts, conversation)
 }
