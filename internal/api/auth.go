@@ -292,7 +292,7 @@ func (s *Server) createSession(ctx context.Context, account string, input verify
 		return security.Tokens{}, err
 	}
 	expiresAt := time.Now().UTC().Add(time.Duration(s.cfg.RefreshTokenDays) * 24 * time.Hour)
-err = s.db.Query(ctx, `CREATE auth_session CONTENT {
+	err = s.db.Query(ctx, `CREATE auth_session CONTENT {
  account: type::record($account), device_id: <string>$device_id, device_name: $device_name,
  platform: $platform, refresh_token_hash: $refresh_hash, expires_at: <datetime>$expires
 };`, map[string]any{
