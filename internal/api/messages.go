@@ -352,29 +352,20 @@ func (s *Server) updateConversationReceipt(w http.ResponseWriter, r *http.Reques
 		respondError(w, http.StatusForbidden, "not_a_member", "Bu sohbete erişiminiz yok.")
 		return
 	}
-	var pending []recordID
 	condition := "status != 'read'"
 	if status == "delivered" {
 		condition = "status = 'sent'"
-	}
-	err := s.db.Query(r.Context(), `SELECT <string>id AS id FROM message_receipt
-WHERE recipient = type::record($account) AND message.conversation = type::record($conversation) AND `+condition+` LIMIT 1;`, map[string]any{
-		"account": accountID(r), "conversation": conversation,
-	}, &pending)
-	if err != nil {
-		s.databaseError(w, "inspect conversation receipt", err)
-		return
-	}
-	if len(pending) == 0 {
-		w.WriteHeader(http.StatusNoContent)
-		return
 	}
 	set := "status = 'delivered', delivered_at = time::now(), updated_at = time::now()"
 	if status == "read" {
 		set = "status = 'read', delivered_at = delivered_at ?? time::now(), read_at = time::now(), updated_at = time::now()"
 	}
-	err = s.db.Query(r.Context(), `UPDATE message_receipt SET `+set+`
-WHERE recipient = type::record($account) AND message.conversation = type::record($conversation) AND `+condition+`;`, map[string]any{
+	err := s.db.Query(r.Context(), `
+LET $messages = SELECT VALUE id FROM message
+WHERE conversation = type::record($conversation);
+UPDATE message_receipt SET `+set+`
+WHERE recipient = type::record($account)
+AND message IN $messages AND `+condition+`;`, map[string]any{
 		"account": accountID(r), "conversation": conversation,
 	}, nil)
 	if err != nil {
