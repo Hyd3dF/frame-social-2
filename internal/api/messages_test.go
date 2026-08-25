@@ -22,3 +22,23 @@ func TestCleanMessageBody(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeReactionsAggregatesEmojiAndKeepsOnlyOneOwnReaction(t *testing.T) {
+	rows := []reactionView{
+		{Emoji: "😂", Count: 1, Mine: true},
+		{Emoji: "😂", Count: 1, Mine: false},
+		{Emoji: "❤️", Count: 1, Mine: true}, // legacy duplicate from this account
+		{Emoji: "❤️", Count: 1, Mine: false},
+	}
+
+	got := normalizeReactions(rows)
+	if len(got) != 2 {
+		t.Fatalf("normalizeReactions() returned %d reactions, want 2: %#v", len(got), got)
+	}
+	if got[0].Emoji != "😂" || got[0].Count != 2 || !got[0].Mine {
+		t.Fatalf("first reaction = %#v, want mine 😂 with count 2", got[0])
+	}
+	if got[1].Emoji != "❤️" || got[1].Count != 1 || got[1].Mine {
+		t.Fatalf("second reaction = %#v, want non-mine ❤️ with count 1", got[1])
+	}
+}
