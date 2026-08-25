@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,6 +39,38 @@ type reactionView struct {
 	Count int    `json:"count"`
 	Emoji string `json:"emoji"`
 	Mine  bool   `json:"mine"`
+}
+
+// normalizeReactions converts the relation rows returned by SurrealDB into the
+// public, per-emoji counters. It also protects clients from legacy data where
+// the current account accidentally left more than one reaction on a message.
+func normalizeReactions(rows []reactionView) []reactionView {
+	result := make([]reactionView, 0, len(rows))
+	indexes := make(map[string]int, len(rows))
+	mineSeen := false
+
+	for _, row := range rows {
+		row.Emoji = strings.TrimSpace(row.Emoji)
+		if row.Emoji == "" || row.Count <= 0 {
+			continue
+		}
+		if row.Mine {
+			if mineSeen {
+				continue
+			}
+			mineSeen = true
+		}
+
+		if index, ok := indexes[row.Emoji]; ok {
+			result[index].Count += row.Count
+			result[index].Mine = result[index].Mine || row.Mine
+			continue
+		}
+		indexes[row.Emoji] = len(result)
+		result = append(result, row)
+	}
+
+	return result
 }
 
 type replyView struct {
@@ -194,6 +225,9 @@ AND deleted_at IS NONE ORDER BY createdAt DESC LIMIT $limit;`, map[string]any{
 	if err != nil {
 		s.databaseError(w, "list messages", err)
 		return
+	}
+	for index := range messages {
+		messages[index].Reactions = normalizeReactions(messages[index].Reactions)
 	}
 	var receiptPrivacy []struct {
 		Enabled bool `json:"enabled"`
@@ -388,10 +422,11 @@ func (s *Server) putReaction(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusForbidden, "forbidden", "Mesaja erişiminiz yok.")
 		return
 	}
-	err := s.db.Query(r.Context(), `IF array::len(SELECT id FROM message_reaction WHERE in = type::record($account) AND out = type::record($message) AND emoji = $emoji) = 0 {
+	err := s.db.Query(r.Context(), `BEGIN TRANSACTION;
+DELETE message_reaction WHERE in = type::record($account) AND out = type::record($message);
 LET $account_record = type::record($account); LET $message_record = type::record($message);
 RELATE $account_record->message_reaction->$message_record CONTENT { emoji: $emoji };
-};`, map[string]any{"account": accountID(r), "message": message, "emoji": input.Emoji}, nil)
+COMMIT TRANSACTION;`, map[string]any{"account": accountID(r), "message": message, "emoji": input.Emoji}, nil)
 	if err != nil {
 		s.databaseError(w, "add reaction", err)
 		return
@@ -401,7 +436,6 @@ RELATE $account_record->message_reaction->$message_record CONTENT { emoji: $emoj
 
 func (s *Server) deleteReaction(w http.ResponseWriter, r *http.Request) {
 	message := "message:" + r.PathValue("id")
-	emoji, _ := url.PathUnescape(r.PathValue("emoji"))
 	if !validRecord(message, "message") {
 		respondError(w, http.StatusBadRequest, "invalid_message", "Mesaj geçersiz.")
 		return
@@ -410,7 +444,7 @@ func (s *Server) deleteReaction(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusForbidden, "forbidden", "Mesaja erişiminiz yok.")
 		return
 	}
-	err := s.db.Query(r.Context(), `DELETE message_reaction WHERE in = type::record($account) AND out = type::record($message) AND emoji = $emoji;`, map[string]any{"account": accountID(r), "message": message, "emoji": emoji}, nil)
+	err := s.db.Query(r.Context(), `DELETE message_reaction WHERE in = type::record($account) AND out = type::record($message);`, map[string]any{"account": accountID(r), "message": message}, nil)
 	if err != nil {
 		s.databaseError(w, "delete reaction", err)
 		return
