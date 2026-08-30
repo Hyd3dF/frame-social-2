@@ -760,6 +760,7 @@ func TestIsInvalidTokenError(t *testing.T) {
 		{"registration-token-not-registered", true},
 		{"invalid-registration-token", true},
 		{"Requested entity was not found. registration-token-not-registered", true},
+		{"NotRegistered", true},
 		{"invalid-argument: token is invalid", true},
 		{"unavailable: internal", false},
 		{"quota exceeded", false},

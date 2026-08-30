@@ -203,6 +203,7 @@ func isInvalidTokenError(err error) bool {
 	// Firebase errors contain codes like: registration-token-not-registered, invalid-registration-token, invalid-argument
 	return strings.Contains(s, "registration-token-not-registered") ||
 		strings.Contains(s, "invalid-registration-token") ||
+		strings.Contains(s, "notregistered") ||
 		strings.Contains(s, "invalid-argument") && strings.Contains(s, "token") ||
 		strings.Contains(s, "not-registered") ||
 		strings.Contains(s, "invalid-registration")

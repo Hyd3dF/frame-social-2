@@ -103,7 +103,7 @@ func (p *persister) doPersist(ctx context.Context, job persistJob) error {
 	err := p.db.Query(ctx, `
 LET $msg = CREATE $mid CONTENT {
  conversation: type::record($conversation), sender: type::record($sender),
- client_id: $client_id, body: $body, kind: 'text', created_at: <datetime>$createdAt
+ client_id: <string>$client_id, body: $body, kind: 'text', created_at: <datetime>$createdAt
 };
 IF $has_reply {
  LET $orig = SELECT * FROM type::record($reply_to) WHERE conversation = type::record($conversation) LIMIT 1;
