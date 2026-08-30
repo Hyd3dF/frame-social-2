@@ -193,13 +193,14 @@ func (s *Server) listBlockedUsers(w http.ResponseWriter, r *http.Request) {
 	account := accountID(r)
 	type blockedUserView struct {
 		AvatarURL   *string `json:"avatarUrl"`
+		CreatedAt   string  `json:"-"`
 		DisplayName string  `json:"displayName"`
 		FullName    string  `json:"fullName"`
 		ID          string  `json:"id"`
 		Username    string  `json:"username"`
 	}
 	var users []blockedUserView
-	err := s.db.Query(r.Context(), `SELECT <string>out AS id, out.full_name AS fullName, out.display_name AS displayName, out.username AS username, out.avatar.public_url AS avatarUrl FROM blocked_account WHERE in = type::record($account) ORDER BY created_at DESC LIMIT 100;`, map[string]any{"account": account}, &users)
+	err := s.db.Query(r.Context(), `SELECT <string>out AS id, <string>created_at AS createdAt, out.full_name AS fullName, out.display_name AS displayName, out.username AS username, out.avatar.public_url AS avatarUrl FROM blocked_account WHERE in = type::record($account) ORDER BY createdAt DESC LIMIT 100;`, map[string]any{"account": account}, &users)
 	if err != nil {
 		s.databaseError(w, "list blocked users", err)
 		return
