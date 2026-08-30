@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -124,7 +125,7 @@ func (s *Server) listConversations(w http.ResponseWriter, r *http.Request) {
 	var conversations []conversationView
 	err := s.db.Query(r.Context(), `
 SELECT <string>out.id AS id, <string>out.updated_at AS updatedAt,
-(SELECT { id: <string>in.id, fullName: in.full_name, displayName: in.display_name, username: in.username, avatarUrl: in.avatar.public_url, isPrivate: false } FROM conversation_member WHERE out = $parent.out AND in != type::record($account) LIMIT 1)[0] AS otherMember,
+(SELECT VALUE { id: <string>in.id, fullName: in.full_name, displayName: in.display_name, username: in.username, avatarUrl: in.avatar.public_url, isPrivate: false } FROM conversation_member WHERE out = $parent.out AND in != type::record($account) LIMIT 1)[0] AS otherMember,
 array::len(SELECT id FROM message_receipt WHERE recipient = type::record($account) AND status != 'read' AND message.conversation = $parent.out) AS unreadCount,
 IF out.last_message IS NONE THEN NONE ELSE {
  id: <string>out.last_message.id, clientId: out.last_message.client_id,
@@ -185,7 +186,7 @@ array::len(SELECT id FROM saved_message WHERE in = type::record($account) AND ou
 (SELECT VALUE status FROM message_receipt WHERE message = $parent.id AND recipient != type::record($account) LIMIT 1)[0] ?? 'sent' AS status,
 (SELECT emoji, 1 AS count, in = type::record($account) AS mine
  FROM message_reaction WHERE out = $parent.id) AS reactions,
-(SELECT { id: <string>in.id, senderId: <string>in.sender, body: in.body } FROM message_reply WHERE out = $parent.id LIMIT 1)[0] AS replyTo
+(SELECT VALUE { id: <string>in.id, senderId: <string>in.sender, body: in.body } FROM message_reply WHERE out = $parent.id LIMIT 1)[0] AS replyTo
 FROM message WHERE conversation = type::record($conversation) AND created_at < <datetime>$before
 AND deleted_at IS NONE ORDER BY createdAt DESC LIMIT $limit;`, map[string]any{
 		"account": accountID(r), "conversation": conversation, "before": cursor, "limit": limit,
@@ -193,6 +194,34 @@ AND deleted_at IS NONE ORDER BY createdAt DESC LIMIT $limit;`, map[string]any{
 	if err != nil {
 		s.databaseError(w, "list messages", err)
 		return
+	}
+	// Messages accepted into the bounded RAM queue are immediately visible to
+	// both participants while the durable SurrealDB write completes.
+	if pending := s.pending.List(conversation); len(pending) > 0 {
+		beforeTime, _ := time.Parse(time.RFC3339Nano, cursor)
+		for _, candidate := range pending {
+			createdAt, parseErr := time.Parse(time.RFC3339Nano, candidate.CreatedAt)
+			if parseErr != nil || !createdAt.Before(beforeTime) {
+				continue
+			}
+			duplicate := false
+			for _, persisted := range messages {
+				if persisted.ID == candidate.ID ||
+					(candidate.ClientID != "" && persisted.ClientID == candidate.ClientID) {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				messages = append(messages, candidate)
+			}
+		}
+		sort.Slice(messages, func(i, j int) bool {
+			return messages[i].CreatedAt > messages[j].CreatedAt
+		})
+		if len(messages) > limit {
+			messages = messages[:limit]
+		}
 	}
 	var receiptPrivacy []struct {
 		Enabled bool `json:"enabled"`
@@ -331,46 +360,17 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 	if input.ReplyToID != "" {
 		view.ReplyTo = &replyView{ID: input.ReplyToID}
 	}
-	// Synchronous durable persist: acknowledged message must be committed
-	// before responding, so every instance reads same data and no pending
-	// cache is needed for determinism.
-	persistCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-	var persistErr error
-	if s.persist != nil {
-		persistErr = s.persist.DoPersist(persistCtx, job)
-	} else {
-		createdAtStr := job.createdAt.Format(time.RFC3339Nano)
-		persistErr = s.db.Query(persistCtx, `
-LET $msg = CREATE $mid CONTENT {
- conversation: type::record($conversation), sender: type::record($sender),
- client_id: $client_id, body: $body, kind: 'text', created_at: <datetime>$createdAt
-};
-IF $has_reply {
- LET $orig = SELECT * FROM type::record($reply_to) WHERE conversation = type::record($conversation) LIMIT 1;
- IF array::len($orig) > 0 {
-  LET $orig_rec = $orig[0];
-  RELATE $orig_rec->message_reply->$msg CONTENT { replied_by: type::record($sender) };
- };
-};
-LET $recipients = SELECT VALUE in FROM conversation_member WHERE out = type::record($conversation) AND in != type::record($sender) AND left_at IS NONE;
-FOR $r IN $recipients {
- CREATE message_receipt CONTENT { message: $msg.id, conversation: type::record($conversation), recipient: $r, status: 'sent' };
-};
-UPDATE type::record($conversation) SET last_message = $msg.id, updated_at = time::now();
-`, map[string]any{
-			"mid":          job.messageID,
-			"conversation": job.conversation,
-			"sender":       job.sender,
-			"client_id":    job.clientID,
-			"body":         job.body,
-			"createdAt":    createdAtStr,
-			"reply_to":     job.replyToID,
-			"has_reply":    job.replyToID != "",
-		}, nil)
+	// Fast path: publish from RAM immediately, then write durably in the
+	// bounded background queue. If the queue is saturated, reject instead of
+	// acknowledging a message that could be lost.
+	if s.persist == nil {
+		respondError(w, http.StatusServiceUnavailable, "service_unavailable", "Servis geçici olarak kullanılamıyor.")
+		return
 	}
-	if persistErr != nil {
-		s.databaseError(w, "persist message", persistErr)
+	s.pending.Append(conversation, view)
+	if !s.persist.enqueue(job) {
+		s.pending.Remove(conversation, job.messageID)
+		respondError(w, http.StatusServiceUnavailable, "service_unavailable", "Servis geçici olarak kullanılamıyor.")
 		return
 	}
 	s.events.publish(members, conversation)

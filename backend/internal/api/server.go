@@ -230,7 +230,7 @@ func New(cfg config.Config, db *database.Client, logger *slog.Logger) http.Handl
 	ps := newPendingStore()
 	server := &Server{cfg: cfg, db: db, events: newMessageEventBroker(), log: logger, members: mc, pending: ps}
 	server.persist = newPersister(db, ps, mc, logger)
-	server.limiter = newSurrealRateLimiter(db, logger)
+	server.limiter = newMemoryMessageRateLimiter()
 	server.pushStore = newPushStore(db, logger)
 	server.pusher = initPusher(cfg, logger)
 	mux := http.NewServeMux()
