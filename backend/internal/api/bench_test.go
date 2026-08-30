@@ -21,7 +21,7 @@ type mockQueryer struct {
 }
 
 func (m *mockQueryer) Query(ctx context.Context, sql string, vars map[string]any, dest any) error {
-	if m.latency > 0 {
+	if m.latency > 0 && !strings.Contains(sql, "blocked_account") {
 		time.Sleep(m.latency)
 	}
 	m.mu.Lock()

@@ -345,6 +345,25 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 			s.log.Debug("message rate allowed", "account", acct)
 		}
 	}
+	if len(members) > 1 {
+		pairs := make([]string, 0, len(members)-1)
+		for _, m := range members {
+			if m != acct {
+				pairs = append(pairs, security.PairKey(acct, m))
+			}
+		}
+		if len(pairs) > 0 {
+			var blocked []recordID
+			if err := s.db.Query(r.Context(), `SELECT <string>id AS id FROM blocked_account WHERE pair_key IN $pairs LIMIT 1;`, map[string]any{"pairs": pairs}, &blocked); err != nil {
+				s.databaseError(w, "check blocked for message", err)
+				return
+			}
+			if len(blocked) > 0 {
+				respondError(w, http.StatusForbidden, "blocked", "Bu kullanıcı ile mesajlaşamazsınız.")
+				return
+			}
+		}
+	}
 	job := newPersistJob(conversation, acct, input.Body, input.ClientID, input.ReplyToID)
 	view := messageView{
 		ID:           job.messageID,

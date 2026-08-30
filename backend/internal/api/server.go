@@ -260,6 +260,10 @@ func New(cfg config.Config, db *database.Client, logger *slog.Logger) http.Handl
 	mux.Handle("GET /v1/friends/requests", server.requireAuth(readLimiter.middleware(accountKeyFunc("read"), http.HandlerFunc(server.listFriendRequests))))
 	mux.Handle("POST /v1/friends/requests/{id}/respond", server.requireAuth(readLimiter.middleware(accountKeyFunc("read"), http.HandlerFunc(server.respondFriendRequest))))
 	mux.Handle("POST /v1/users/{id}/block", server.requireAuth(readLimiter.middleware(accountKeyFunc("read"), http.HandlerFunc(server.blockUser))))
+	mux.Handle("DELETE /v1/users/{id}/block", server.requireAuth(readLimiter.middleware(accountKeyFunc("read"), http.HandlerFunc(server.unblockUser))))
+	mux.Handle("GET /v1/me/blocked-users", server.requireAuth(readLimiter.middleware(accountKeyFunc("read"), http.HandlerFunc(server.listBlockedUsers))))
+	mux.Handle("DELETE /v1/friends/{id}", server.requireAuth(readLimiter.middleware(accountKeyFunc("read"), http.HandlerFunc(server.unfriend))))
+	mux.Handle("DELETE /v1/me", server.requireAuth(readLimiter.middleware(accountKeyFunc("read"), http.HandlerFunc(server.deleteAccount))))
 
 	mux.Handle("GET /v1/conversations", server.requireAuth(readLimiter.middleware(accountKeyFunc("read"), http.HandlerFunc(server.listConversations))))
 	mux.Handle("GET /v1/events/messages", server.requireAuth(eventLimiter.middleware(accountKeyFunc("events"), http.HandlerFunc(server.messageEvents))))
