@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,6 +28,90 @@ const (
 
 type messageRateLimiter interface {
 	Check(ctx context.Context, account, clientId string) (allowed bool, isDuplicate bool, retryAfter int, blockedUntil time.Time, err error)
+}
+
+// memoryMessageRateLimiter keeps the hot message path independent from the
+// remote database. The service currently runs as one Railway replica, so this
+// gives constant-time rate limiting and idempotency without a network round
+// trip on every message.
+type memoryMessageRateLimiter struct {
+	mu       sync.Mutex
+	accounts map[string]*memoryMessageRateState
+	now      func() time.Time
+}
+
+type memoryMessageRateState struct {
+	timestamps   []time.Time
+	blockedUntil time.Time
+	dedup        map[string]time.Time
+	lastSeen     time.Time
+}
+
+func newMemoryMessageRateLimiter() messageRateLimiter {
+	limiter := &memoryMessageRateLimiter{
+		accounts: make(map[string]*memoryMessageRateState),
+		now:      time.Now,
+	}
+	go limiter.cleanup()
+	return limiter
+}
+
+func (l *memoryMessageRateLimiter) Check(_ context.Context, account, clientID string) (bool, bool, int, time.Time, error) {
+	now := l.now().UTC()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	state := l.accounts[account]
+	if state == nil {
+		state = &memoryMessageRateState{dedup: make(map[string]time.Time)}
+		l.accounts[account] = state
+	}
+	state.lastSeen = now
+	if expiry, exists := state.dedup[clientID]; clientID != "" && exists && expiry.After(now) {
+		return true, true, 0, time.Time{}, nil
+	}
+	if state.blockedUntil.After(now) {
+		retry := int(math.Ceil(state.blockedUntil.Sub(now).Seconds()))
+		if retry < 1 {
+			retry = 1
+		}
+		return false, false, retry, state.blockedUntil, nil
+	}
+	cutoff := now.Add(-messageRateWindow)
+	kept := state.timestamps[:0]
+	for _, timestamp := range state.timestamps {
+		if timestamp.After(cutoff) {
+			kept = append(kept, timestamp)
+		}
+	}
+	state.timestamps = kept
+	if len(state.timestamps) >= messageRateLimit {
+		state.blockedUntil = now.Add(messageRatePenalty)
+		return false, false, int(messageRatePenalty.Seconds()), state.blockedUntil, nil
+	}
+	state.timestamps = append(state.timestamps, now)
+	if clientID != "" {
+		state.dedup[clientID] = now.Add(messageDedupTTL)
+	}
+	return true, false, 0, time.Time{}, nil
+}
+
+func (l *memoryMessageRateLimiter) cleanup() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for now := range ticker.C {
+		l.mu.Lock()
+		for account, state := range l.accounts {
+			for clientID, expiry := range state.dedup {
+				if !expiry.After(now) {
+					delete(state.dedup, clientID)
+				}
+			}
+			if now.Sub(state.lastSeen) > messageDedupTTL && len(state.dedup) == 0 {
+				delete(l.accounts, account)
+			}
+		}
+		l.mu.Unlock()
+	}
 }
 
 type surrealRateLimiter struct {

@@ -132,10 +132,11 @@ func (m *pushMockDB) Query(ctx context.Context, sql string, vars map[string]any,
 		}
 		return nil
 	}
-	// UPDATE type::record($id) SET token = $token, platform = $platform
-	if strings.Contains(sql, "UPDATE type::record($id) SET token = $token") {
+	// UPDATE type::record($id) SET token = $fcmToken, platform = $platform.
+	// "token" is a protected SurrealDB bind-variable name.
+	if strings.Contains(sql, "UPDATE type::record($id) SET token = $fcmToken") {
 		id, _ := vars["id"].(string)
-		token, _ := vars["token"].(string)
+		token, _ := vars["fcmToken"].(string)
 		platform, _ := vars["platform"].(string)
 		if dev, ok := m.byID[id]; ok {
 			dev.Token = token
@@ -156,7 +157,7 @@ func (m *pushMockDB) Query(ctx context.Context, sql string, vars map[string]any,
 	// CREATE push_device CONTENT
 	if strings.Contains(sql, "CREATE push_device CONTENT") {
 		acct, _ := vars["account"].(string)
-		token, _ := vars["token"].(string)
+		token, _ := vars["fcmToken"].(string)
 		platform, _ := vars["platform"].(string)
 		devID, _ := vars["deviceId"].(string)
 		key := acct + "|" + devID

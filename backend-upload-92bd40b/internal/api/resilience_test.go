@@ -38,14 +38,17 @@ func TestDBSlowDoesNotBlockSend(t *testing.T) {
 	if w.Code != 201 {
 		t.Fatalf("expected 201 got %d body %s", w.Code, w.Body.String())
 	}
-	// After determinism fix, sendMessage is synchronous and durable, so it
-	// incurs DB latency. It should still complete within a reasonable bound
-	// and must not rely on pending cache for reads.
-	if elapsed < 150*time.Millisecond || elapsed > 2000*time.Millisecond {
-		t.Fatalf("sendMessage durable persist should reflect DB latency ~200ms, got %v", elapsed)
+	// The accepted message must return from the RAM fast path without waiting
+	// for the deliberately slow database.
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("sendMessage should not wait for 200ms DB latency, got %v", elapsed)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(srv.pending.List("conversation:slow")) != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
 	}
 	if len(srv.pending.List("conversation:slow")) != 0 {
-		t.Fatalf("pending should be empty after durable persist, got %d", len(srv.pending.List("conversation:slow")))
+		t.Fatalf("pending message was not cleared after background persistence")
 	}
 }
 
@@ -110,13 +113,10 @@ func TestPendingSurvivesForListMessages(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("expected 200 got %d %s", w.Code, w.Body.String())
 	}
-	// Deterministic: listMessages must read persisted data only, never merge
-	// process-local pending cache. A second device must not see pending1.
-	if strings.Contains(w.Body.String(), "pending1") {
-		t.Fatalf("pending message should not be merged for determinism, body %s", w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), `"messages":[]`) && !strings.Contains(w.Body.String(), `"messages": []`) {
-		t.Fatalf("expected empty messages array for empty DB, body %s", w.Body.String())
+	// The recipient reads the accepted message directly from RAM while its
+	// durable database write is still in flight.
+	if !strings.Contains(w.Body.String(), "pending1") {
+		t.Fatalf("pending message should be visible from RAM, body %s", w.Body.String())
 	}
 }
 

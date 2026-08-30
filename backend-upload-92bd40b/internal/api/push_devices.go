@@ -73,9 +73,9 @@ func (s *pushStore) Upsert(ctx context.Context, account, deviceID, token, platfo
 	if len(existing) > 0 {
 		id := existing[0].ID
 		var updated []pushDevice
-		err = s.db.Query(ctx, `UPDATE type::record($id) SET token = $token, platform = $platform, updated_at = time::now() RETURN AFTER`, map[string]any{
+		err = s.db.Query(ctx, `UPDATE type::record($id) SET token = $fcmToken, platform = $platform, updated_at = time::now() RETURN AFTER`, map[string]any{
 			"id":       id,
-			"token":    token,
+			"fcmToken": token,
 			"platform": platform,
 		}, &updated)
 		if err != nil {
@@ -97,10 +97,10 @@ func (s *pushStore) Upsert(ctx context.Context, account, deviceID, token, platfo
 	}
 	// Create
 	var created []pushDevice
-	err = s.db.Query(ctx, `CREATE push_device CONTENT { account: type::record($account), token: $token, platform: $platform, device_id: $deviceId, created_at: time::now(), updated_at: time::now() } RETURN AFTER`, map[string]any{
+	err = s.db.Query(ctx, `CREATE push_device CONTENT { account: type::record($account), token: $fcmToken, platform: $platform, device_id: $deviceId, created_at: time::now(), updated_at: time::now() } RETURN AFTER`, map[string]any{
 		"account":  account,
 		"deviceId": deviceID,
-		"token":    token,
+		"fcmToken": token,
 		"platform": platform,
 	}, &created)
 	if err != nil {
@@ -110,7 +110,7 @@ func (s *pushStore) Upsert(ctx context.Context, account, deviceID, token, platfo
 			err2 := s.db.Query(ctx, `SELECT <string>id AS id FROM push_device WHERE account = type::record($account) AND device_id = $deviceId LIMIT 1`, map[string]any{"account": account, "deviceId": deviceID}, &retry)
 			if err2 == nil && len(retry) > 0 {
 				var updated []pushDevice
-				_ = s.db.Query(ctx, `UPDATE type::record($id) SET token = $token, platform = $platform, updated_at = time::now() RETURN AFTER`, map[string]any{"id": retry[0].ID, "token": token, "platform": platform}, &updated)
+				_ = s.db.Query(ctx, `UPDATE type::record($id) SET token = $fcmToken, platform = $platform, updated_at = time::now() RETURN AFTER`, map[string]any{"id": retry[0].ID, "fcmToken": token, "platform": platform}, &updated)
 				if len(updated) > 0 {
 					return &updated[0], nil
 				}

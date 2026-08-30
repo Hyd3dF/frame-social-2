@@ -56,11 +56,13 @@ func newPersister(db queryer, pending *pendingStore, cache *memberCache, log *sl
 	return p
 }
 
-func (p *persister) enqueue(j persistJob) {
+func (p *persister) enqueue(j persistJob) bool {
 	select {
 	case p.ch <- j:
+		return true
 	default:
-		p.log.Error("persist queue full, dropping job", "conversation", j.conversation, "clientId", j.clientID)
+		p.log.Error("persist queue full, rejecting message", "conversation", j.conversation)
+		return false
 	}
 }
 
