@@ -11,13 +11,22 @@ import (
 
 type accountEventState struct {
 	changes map[string]uint64
+	minimum uint64
 	version uint64
 	waiters map[chan struct{}]struct{}
 }
 
+const (
+	maxEventChanges           = 1000
+	maxEventAccounts          = 10000
+	maxEventWaiters           = 10000
+	maxEventWaitersPerAccount = 10
+)
+
 type messageEventBroker struct {
-	accounts map[string]*accountEventState
-	mu       sync.Mutex
+	accounts    map[string]*accountEventState
+	mu          sync.Mutex
+	waiterCount int
 }
 
 type messageEventView struct {
@@ -39,12 +48,30 @@ func (b *messageEventBroker) publish(accounts []string, conversation string) {
 			continue
 		}
 		seen[account] = struct{}{}
-		state := b.state(account)
+		state := b.accounts[account]
+		if state == nil {
+			if len(b.accounts) >= maxEventAccounts {
+				b.trimInactiveStates()
+			}
+			if len(b.accounts) >= maxEventAccounts {
+				continue
+			}
+			state = b.state(account)
+		}
 		state.version++
 		state.changes[conversation] = state.version
+		if len(state.changes) > maxEventChanges {
+			state.minimum = state.version - maxEventChanges
+			for id, version := range state.changes {
+				if version <= state.minimum {
+					delete(state.changes, id)
+				}
+			}
+		}
 		for waiter := range state.waiters {
 			close(waiter)
 			delete(state.waiters, waiter)
+			b.waiterCount--
 		}
 	}
 }
@@ -52,8 +79,19 @@ func (b *messageEventBroker) publish(accounts []string, conversation string) {
 func (b *messageEventBroker) wait(ctx context.Context, account string, after uint64) (messageEventView, bool) {
 	for {
 		b.mu.Lock()
-		state := b.state(account)
-		if after > state.version {
+		state := b.accounts[account]
+		if state == nil {
+			if len(b.accounts) >= maxEventAccounts {
+				b.trimInactiveStates()
+			}
+			if len(b.accounts) >= maxEventAccounts {
+				view := messageEventView{Resync: true}
+				b.mu.Unlock()
+				return view, true
+			}
+			state = b.state(account)
+		}
+		if after > state.version || after < state.minimum {
 			view := messageEventView{Resync: true, Version: state.version}
 			b.mu.Unlock()
 			return view, true
@@ -69,18 +107,46 @@ func (b *messageEventBroker) wait(ctx context.Context, account string, after uin
 			b.mu.Unlock()
 			return view, true
 		}
+		if len(state.waiters) >= maxEventWaitersPerAccount || b.waiterCount >= maxEventWaiters {
+			view := messageEventView{Resync: true, Version: state.version}
+			b.mu.Unlock()
+			return view, true
+		}
 		waiter := make(chan struct{})
 		state.waiters[waiter] = struct{}{}
+		b.waiterCount++
 		b.mu.Unlock()
 
 		select {
 		case <-ctx.Done():
 			b.mu.Lock()
-			delete(b.state(account).waiters, waiter)
-			version := b.state(account).version
+			state := b.accounts[account]
+			if state != nil {
+				if _, waiting := state.waiters[waiter]; waiting {
+					delete(state.waiters, waiter)
+					b.waiterCount--
+				}
+			}
+			version := uint64(0)
+			if state != nil {
+				version = state.version
+			}
 			b.mu.Unlock()
 			return messageEventView{Version: version}, false
 		case <-waiter:
+		}
+	}
+}
+
+// trimInactiveStates keeps per-account event cursors from growing without
+// bound. Active long-poll and SSE clients are never removed here.
+func (b *messageEventBroker) trimInactiveStates() {
+	for account, state := range b.accounts {
+		if len(state.waiters) == 0 {
+			delete(b.accounts, account)
+			if len(b.accounts) < maxEventAccounts {
+				return
+			}
 		}
 	}
 }

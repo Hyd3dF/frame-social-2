@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -92,7 +93,7 @@ func (c *Client) Query(ctx context.Context, sql string, vars map[string]any, des
 		return fmt.Errorf("surreal returned HTTP %d", response.StatusCode)
 	}
 	var envelope rpcResponse
-	if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
+	if err := json.NewDecoder(io.LimitReader(response.Body, 16<<20)).Decode(&envelope); err != nil {
 		return fmt.Errorf("decode surreal response: %w", err)
 	}
 	if envelope.Error != nil {

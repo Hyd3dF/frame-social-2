@@ -74,6 +74,34 @@ func TestBrokerConcurrentWakes(t *testing.T) {
 	}
 }
 
+func TestBrokerBoundsWaiters(t *testing.T) {
+	b := newMessageEventBroker()
+	b.mu.Lock()
+	state := b.state("account:x")
+	for range maxEventWaitersPerAccount {
+		state.waiters[make(chan struct{})] = struct{}{}
+	}
+	b.waiterCount = maxEventWaitersPerAccount
+	b.mu.Unlock()
+	view, connected := b.wait(context.Background(), "account:x", 0)
+	if !connected || !view.Resync {
+		t.Fatalf("saturated broker should ask the client to resync: %#v", view)
+	}
+}
+
+func TestBrokerRetainsInactiveStateBelowCapacity(t *testing.T) {
+	b := newMessageEventBroker()
+	b.publish([]string{"account:one"}, "conversation:one")
+	b.publish([]string{"account:two"}, "conversation:two")
+	b.mu.Lock()
+	_, firstExists := b.accounts["account:one"]
+	_, secondExists := b.accounts["account:two"]
+	b.mu.Unlock()
+	if !firstExists || !secondExists {
+		t.Fatal("inactive event cursors were evicted before the broker reached capacity")
+	}
+}
+
 func TestMemberCacheConcurrent(t *testing.T) {
 	c := newMemberCache()
 	var wg sync.WaitGroup

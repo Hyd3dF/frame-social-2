@@ -27,8 +27,10 @@ func main() {
 		Handler:           api.New(cfg, db, logger),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// Event streams are intentionally long-lived; WriteTimeout would close
+		// every SSE connection after 30 seconds regardless of activity.
+		WriteTimeout: 0,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	go func() {

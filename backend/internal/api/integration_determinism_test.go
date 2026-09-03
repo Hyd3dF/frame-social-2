@@ -196,7 +196,7 @@ func (m *integrationMockDB) Query(ctx context.Context, sql string, vars map[stri
 	}
 
 	// doPersist for sendMessage - CREATE $mid CONTENT with conversation, sender, client_id
-	if strings.Contains(sql, "CREATE $mid CONTENT") && strings.Contains(sql, "conversation: type::record") {
+	if strings.Contains(sql, "CREATE ONLY $mid CONTENT") && strings.Contains(sql, "conversation: type::record") {
 		mid, _ := vars["mid"].(string)
 		conv, _ := vars["conversation"].(string)
 		sender, _ := vars["sender"].(string)
@@ -241,6 +241,19 @@ func (m *integrationMockDB) Query(ctx context.Context, sql string, vars map[stri
 		if acct, ok := m.sessions[oldHash]; ok {
 			delete(m.sessions, oldHash)
 			m.sessions[newHash] = acct
+			if dest != nil {
+				b, _ := json.Marshal([]struct {
+					Account   string `json:"account"`
+					ExpiresAt string `json:"expiresAt"`
+				}{{Account: acct, ExpiresAt: time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339Nano)}})
+				_ = json.Unmarshal(b, dest)
+			}
+		} else if dest != nil {
+			b, _ := json.Marshal([]struct {
+				Account   string `json:"account"`
+				ExpiresAt string `json:"expiresAt"`
+			}{})
+			_ = json.Unmarshal(b, dest)
 		}
 		return nil
 	}

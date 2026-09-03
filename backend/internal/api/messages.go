@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/url"
 	"sort"
@@ -14,19 +13,13 @@ import (
 	"github.com/Hyd3dF/frame-social-2/internal/security"
 )
 
-type conversationView struct {
-	ID          string       `json:"id"`
-	LastMessage *messageView `json:"lastMessage"`
-	OtherMember userView     `json:"otherMember"`
-	UnreadCount int          `json:"unreadCount"`
-	UpdatedAt   string       `json:"updatedAt"`
-}
-
 type messageView struct {
 	Body         *string        `json:"body"`
 	ClientID     string         `json:"clientId"`
 	Conversation string         `json:"conversationId"`
 	CreatedAt    string         `json:"createdAt"`
+	Deleted      bool           `json:"deleted,omitempty"`
+	DeletedAt    *string        `json:"deletedAt,omitempty"`
 	ID           string         `json:"id"`
 	Kind         string         `json:"kind"`
 	Reactions    []reactionView `json:"reactions"`
@@ -46,101 +39,6 @@ type replyView struct {
 	Body     *string `json:"body"`
 	ID       string  `json:"id"`
 	SenderID string  `json:"senderId"`
-}
-
-func (s *Server) createDirectConversation(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		UserID string `json:"userId"`
-	}
-	if !decode(w, r, &input) || !validRecord(input.UserID, "account") {
-		if input.UserID != "" {
-			respondError(w, http.StatusBadRequest, "invalid_user", "Kullanıcı geçersiz.")
-		}
-		return
-	}
-	actor := accountID(r)
-	if actor == input.UserID {
-		respondError(w, http.StatusBadRequest, "self_conversation", "Kendinizle sohbet başlatamazsınız.")
-		return
-	}
-	pair := security.PairKey(actor, input.UserID)
-	var decision []struct {
-		Exists     bool   `json:"exists"`
-		IsFriend   bool   `json:"isFriend"`
-		Permission string `json:"permission"`
-		Blocked    bool   `json:"blocked"`
-	}
-	err := s.db.Query(r.Context(), `RETURN [{
-exists: array::len(SELECT id FROM account WHERE id = type::record($target) AND status = 'active') > 0,
-isFriend: array::len(SELECT id FROM friendship WHERE pair_key = $pair) > 0,
-blocked: array::len(SELECT id FROM blocked_account WHERE pair_key = $pair) > 0,
-permission: (SELECT VALUE message_permission FROM privacy_setting WHERE account = type::record($target) LIMIT 1)[0] ?? 'friends'
-}];`, map[string]any{"target": input.UserID, "pair": pair}, &decision)
-	if err != nil {
-		s.databaseError(w, "authorize direct conversation", err)
-		return
-	}
-	if len(decision) == 0 || !decision[0].Exists {
-		respondError(w, http.StatusNotFound, "user_not_found", "Kullanıcı bulunamadı.")
-		return
-	}
-	if decision[0].Blocked || decision[0].Permission == "nobody" || (decision[0].Permission == "friends" && !decision[0].IsFriend) {
-		respondError(w, http.StatusForbidden, "messages_not_allowed", "Bu kullanıcı yalnızca izin verdiği kişilerden mesaj alıyor.")
-		return
-	}
-	conversationID, err := s.ensureDirectConversation(r.Context(), actor, input.UserID, pair)
-	if err != nil {
-		s.databaseError(w, "create direct conversation", err)
-		return
-	}
-	s.members.Set(conversationID, []string{actor, input.UserID})
-	s.events.publish([]string{actor, input.UserID}, conversationID)
-	respondJSON(w, http.StatusCreated, recordID{ID: conversationID})
-}
-
-func (s *Server) ensureDirectConversation(ctx context.Context, actor, target, pair string) (string, error) {
-	var result []recordID
-	err := s.db.Query(ctx, `
-LET $existing = SELECT * FROM conversation WHERE direct_key = $pair LIMIT 1;
-LET $actor_record = type::record($actor);
-LET $target_record = type::record($target);
-LET $conversation = IF array::len($existing) > 0 THEN $existing[0] ELSE (CREATE ONLY conversation CONTENT {
- kind: 'direct', direct_key: $pair, created_by: $actor_record
-}) END;
-IF array::len($existing) = 0 {
- RELATE $actor_record->conversation_member->$conversation CONTENT { role: 'member' };
- RELATE $target_record->conversation_member->$conversation CONTENT { role: 'member' };
-};
-RETURN [{ id: <string>$conversation.id }];`, map[string]any{"pair": pair, "actor": actor, "target": target}, &result)
-	if err != nil {
-		return "", err
-	}
-	if len(result) == 0 {
-		return "", errors.New("conversation was not returned")
-	}
-	return result[0].ID, nil
-}
-
-func (s *Server) listConversations(w http.ResponseWriter, r *http.Request) {
-	var conversations []conversationView
-	err := s.db.Query(r.Context(), `
-SELECT <string>out.id AS id, <string>out.updated_at AS updatedAt,
-(SELECT VALUE { id: <string>in.id, fullName: in.full_name, displayName: in.display_name, username: in.username, avatarUrl: in.avatar.public_url, isPrivate: false } FROM conversation_member WHERE out = $parent.out AND in != type::record($account) LIMIT 1)[0] AS otherMember,
-array::len(SELECT id FROM message_receipt WHERE recipient = type::record($account) AND status != 'read' AND message.conversation = $parent.out) AS unreadCount,
-IF out.last_message IS NONE THEN NONE ELSE {
- id: <string>out.last_message.id, clientId: out.last_message.client_id,
- conversationId: <string>out.id, senderId: <string>out.last_message.sender,
- body: out.last_message.body, kind: out.last_message.kind,
- createdAt: <string>out.last_message.created_at, status: 'sent', saved: false,
- reactions: [], replyTo: NONE
-} END AS lastMessage
-FROM conversation_member WHERE in = type::record($account) AND left_at IS NONE
-ORDER BY updatedAt DESC LIMIT 100;`, map[string]any{"account": accountID(r)}, &conversations)
-	if err != nil {
-		s.databaseError(w, "list conversations", err)
-		return
-	}
-	respondJSON(w, http.StatusOK, map[string]any{"conversations": conversations})
 }
 
 func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
@@ -181,14 +79,17 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
 	var messages []messageView
 	err = s.db.Query(r.Context(), `SELECT <string>id AS id, client_id AS clientId,
 <string>conversation AS conversationId, <string>sender AS senderId, body, kind,
-<string>created_at AS createdAt,
+<string>created_at AS createdAt, deleted_at IS NOT NONE AS deleted,
+IF deleted_at IS NONE THEN NONE ELSE <string>deleted_at END AS deletedAt,
 array::len(SELECT id FROM saved_message WHERE in = type::record($account) AND out = $parent.id) > 0 AS saved,
 (SELECT VALUE status FROM message_receipt WHERE message = $parent.id AND recipient != type::record($account) LIMIT 1)[0] ?? 'sent' AS status,
 (SELECT emoji, 1 AS count, in = type::record($account) AS mine
  FROM message_reaction WHERE out = $parent.id) AS reactions,
 (SELECT VALUE { id: <string>in.id, senderId: <string>in.sender, body: in.body } FROM message_reply WHERE out = $parent.id LIMIT 1)[0] AS replyTo
 FROM message WHERE conversation = type::record($conversation) AND created_at < <datetime>$before
-AND deleted_at IS NONE ORDER BY createdAt DESC LIMIT $limit;`, map[string]any{
+AND (deleted_at IS NONE OR deleted_mode = 'retracted')
+AND array::len(SELECT id FROM message_hidden WHERE in = type::record($account) AND out = $parent.id) = 0
+ORDER BY createdAt DESC LIMIT $limit;`, map[string]any{
 		"account": accountID(r), "conversation": conversation, "before": cursor, "limit": limit,
 	}, &messages)
 	if err != nil {
@@ -200,6 +101,9 @@ AND deleted_at IS NONE ORDER BY createdAt DESC LIMIT $limit;`, map[string]any{
 	if pending := s.pending.List(conversation); len(pending) > 0 {
 		beforeTime, _ := time.Parse(time.RFC3339Nano, cursor)
 		for _, candidate := range pending {
+			if s.pending.IsHidden(accountID(r), candidate.ID) {
+				continue
+			}
 			createdAt, parseErr := time.Parse(time.RFC3339Nano, candidate.CreatedAt)
 			if parseErr != nil || !createdAt.Before(beforeTime) {
 				continue
@@ -309,6 +213,12 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusForbidden, "not_a_member", "Bu sohbete mesaj gönderemezsiniz.")
 		return
 	}
+	if s.persist == nil {
+		respondError(w, http.StatusServiceUnavailable, "service_unavailable", "Servis geçici olarak kullanılamıyor.")
+		return
+	}
+	unlock := s.lockMessageAdmission(acct, input.ClientID)
+	defer unlock()
 	if s.limiter != nil {
 		allowed, isDup, retryAfter, blockedUntil, err := s.limiter.Check(r.Context(), acct, input.ClientID)
 		if err != nil {
@@ -319,17 +229,17 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if isDup {
-			var existing []messageView
-			_ = s.db.Query(r.Context(), `SELECT <string>id AS id, client_id AS clientId, <string>conversation AS conversationId, <string>sender AS senderId, body, kind, <string>created_at AS createdAt FROM message WHERE sender = type::record($account) AND client_id = $clientId LIMIT 1`, map[string]any{"account": acct, "clientId": input.ClientID}, &existing)
-			if len(existing) > 0 {
-				respondJSON(w, http.StatusOK, existing[0])
-				return
-			}
 			for _, p := range s.pending.List(conversation) {
-				if p.ClientID == input.ClientID {
+				if p.ClientID == input.ClientID && !s.pending.IsHidden(acct, p.ID) {
 					respondJSON(w, http.StatusOK, p)
 					return
 				}
+			}
+			var existing []messageView
+			_ = s.db.Query(r.Context(), `SELECT <string>id AS id, client_id AS clientId, <string>conversation AS conversationId, <string>sender AS senderId, body, kind, <string>created_at AS createdAt, deleted_at IS NOT NONE AS deleted, IF deleted_at IS NONE THEN NONE ELSE <string>deleted_at END AS deletedAt FROM message WHERE sender = type::record($account) AND client_id = $clientId AND (deleted_at IS NONE OR deleted_mode = 'retracted') AND array::len(SELECT id FROM message_hidden WHERE in = type::record($account) AND out = $parent.id) = 0 LIMIT 1`, map[string]any{"account": acct, "clientId": input.ClientID}, &existing)
+			if len(existing) > 0 {
+				respondJSON(w, http.StatusOK, existing[0])
+				return
 			}
 			respondJSON(w, http.StatusOK, map[string]any{"clientId": input.ClientID, "status": "sent"})
 			return
@@ -341,11 +251,8 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 			respondRateLimited(w, retryAfter, blockedUntil)
 			return
 		}
-		if s.log != nil {
-			s.log.Debug("message rate allowed", "account", acct)
-		}
 	}
-	if len(members) > 1 {
+	if len(members) > 1 && len(members) == 2 {
 		pairs := make([]string, 0, len(members)-1)
 		for _, m := range members {
 			if m != acct {
@@ -379,16 +286,10 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 	if input.ReplyToID != "" {
 		view.ReplyTo = &replyView{ID: input.ReplyToID}
 	}
-	// Fast path: publish from RAM immediately, then write durably in the
-	// bounded background queue. If the queue is saturated, reject instead of
-	// acknowledging a message that could be lost.
-	if s.persist == nil {
-		respondError(w, http.StatusServiceUnavailable, "service_unavailable", "Servis geçici olarak kullanılamıyor.")
-		return
-	}
-	s.pending.Append(conversation, view)
-	if !s.persist.enqueue(job) {
-		s.pending.Remove(conversation, job.messageID)
+	// Fast path: publish from RAM immediately after atomically reserving a
+	// bounded persistence slot. Saturation is rejected before acknowledgement.
+	if !s.persist.accept(&job, &view) {
+		s.forgetMessageDedup(r.Context(), acct, input.ClientID)
 		respondError(w, http.StatusServiceUnavailable, "service_unavailable", "Servis geçici olarak kullanılamıyor.")
 		return
 	}
@@ -396,6 +297,17 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 	// Fire push notifications to recipients' devices (non-blocking, failures are logged and do not affect message delivery)
 	s.triggerPushForMessage(acct, conversation, job.messageID, members)
 	respondJSON(w, http.StatusCreated, view)
+}
+
+func (s *Server) lockMessageAdmission(account, clientID string) func() {
+	hash := uint32(2166136261)
+	for _, value := range account + "\x00" + clientID {
+		hash ^= uint32(value)
+		hash *= 16777619
+	}
+	lock := &s.messageLocks[hash%uint32(len(s.messageLocks))]
+	lock.Lock()
+	return lock.Unlock
 }
 
 func cleanMessageBody(value string) string {
@@ -484,9 +396,11 @@ func (s *Server) putReaction(w http.ResponseWriter, r *http.Request) {
 	}
 	acct := normalizeRecordID(accountID(r), "account")
 	// One-reaction-per-user: replace any existing reaction by this user for this message
-	err := s.db.Query(r.Context(), `DELETE message_reaction WHERE in = type::record($account) AND out = type::record($message);
+	err := s.db.Query(r.Context(), `BEGIN TRANSACTION;
+DELETE message_reaction WHERE in = type::record($account) AND out = type::record($message);
 LET $account_record = type::record($account); LET $message_record = type::record($message);
-RELATE $account_record->message_reaction->$message_record CONTENT { emoji: $emoji };`, map[string]any{"account": acct, "message": message, "emoji": input.Emoji}, nil)
+RELATE $account_record->message_reaction->$message_record CONTENT { emoji: $emoji };
+COMMIT TRANSACTION;`, map[string]any{"account": acct, "message": message, "emoji": input.Emoji}, nil)
 	if err != nil {
 		s.databaseError(w, "add reaction", err)
 		return

@@ -24,5 +24,6 @@ COMMIT TRANSACTION;`
 		return
 	}
 	s.members.Clear()
+	s.deletedAccounts.Store(account, struct{}{})
 	w.WriteHeader(http.StatusNoContent)
 }

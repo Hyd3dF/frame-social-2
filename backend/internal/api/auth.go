@@ -314,28 +314,18 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "rotate refresh token", err)
 		return
 	}
-	err = s.db.Query(r.Context(), `UPDATE auth_session SET
-refresh_token_hash = $new_hash, last_used_at = time::now()
-WHERE refresh_token_hash = $old_hash AND revoked_at IS NONE AND expires_at > time::now();`, map[string]any{
-		"old_hash": security.TokenHash(input.RefreshToken), "new_hash": security.TokenHash(newRefresh),
-	}, nil)
-	if err != nil {
-		s.databaseError(w, "refresh session", err)
-		return
-	}
-	// Read the rotated session back explicitly so the account id is derived
-	// with the same SELECT/cast pattern used by every other endpoint.
 	var sessions []struct {
 		Account   string `json:"account"`
 		ExpiresAt string `json:"expiresAt"`
 	}
-	err = s.db.Query(r.Context(), `SELECT <string>account AS account,
-<string>expires_at AS expiresAt FROM auth_session
-WHERE refresh_token_hash = $hash AND revoked_at IS NONE LIMIT 1;`, map[string]any{
-		"hash": security.TokenHash(newRefresh),
+	err = s.db.Query(r.Context(), `UPDATE auth_session SET
+refresh_token_hash = $new_hash, last_used_at = time::now()
+WHERE refresh_token_hash = $old_hash AND revoked_at IS NONE AND expires_at > time::now()
+RETURN AFTER { account: <string>account, expiresAt: <string>expires_at };`, map[string]any{
+		"old_hash": security.TokenHash(input.RefreshToken), "new_hash": security.TokenHash(newRefresh),
 	}, &sessions)
 	if err != nil {
-		s.databaseError(w, "refresh session lookup", err)
+		s.databaseError(w, "refresh session", err)
 		return
 	}
 	if len(sessions) == 0 || sessions[0].Account == "" ||

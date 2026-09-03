@@ -27,9 +27,6 @@ type noopPusher struct {
 }
 
 func (n *noopPusher) Send(ctx context.Context, tokens []string, title, body string, data map[string]string) ([]string, error) {
-	if n.log != nil {
-		n.log.Debug("push disabled: would send", "tokens", len(tokens), "title", title)
-	}
 	return nil, nil
 }
 
@@ -47,6 +44,13 @@ type mockPushCall struct {
 	Title  string
 	Body   string
 	Data   map[string]string
+}
+
+type pushJob struct {
+	conversationID string
+	members        []string
+	messageID      string
+	senderID       string
 }
 
 func (m *mockPusher) Send(ctx context.Context, tokens []string, title, body string, data map[string]string) ([]string, error) {
@@ -122,9 +126,10 @@ func (f *firebasePusher) Send(ctx context.Context, tokens []string, title, body 
 	if len(tokens) == 0 {
 		return nil, nil
 	}
-	// Firebase multicast limit is 500 tokens per request
+	// Firebase multicast limit is 500 tokens per request.
 	const batchSize = 500
 	var allInvalid []string
+	var firstErr error
 	for i := 0; i < len(tokens); i += batchSize {
 		end := i + batchSize
 		if end > len(tokens) {
@@ -133,18 +138,18 @@ func (f *firebasePusher) Send(ctx context.Context, tokens []string, title, body 
 		batch := tokens[i:end]
 		invalid, err := f.sendBatch(ctx, batch, title, body, data)
 		if err != nil {
-			// Log but continue with next batches; collect invalid anyway
 			if f.log != nil {
-				f.log.Error("fcm batch send failed", "error", err, "batchSize", len(batch))
+				f.log.Error("fcm batch send failed", "batchSize", len(batch))
 			}
-			// Don't return whole error otherwise caller would not clean invalid; we return error but also invalid
-			// For transient errors (unavailable), we shouldn't delete tokens, so only return invalid if error is not transport
 			allInvalid = append(allInvalid, invalid...)
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		allInvalid = append(allInvalid, invalid...)
 	}
-	return allInvalid, nil
+	return allInvalid, firstErr
 }
 
 func (f *firebasePusher) sendBatch(ctx context.Context, tokens []string, title, body string, data map[string]string) ([]string, error) {
@@ -183,11 +188,11 @@ func (f *firebasePusher) sendBatch(ctx context.Context, tokens []string, title, 
 			if r.Error != nil && isInvalidTokenError(r.Error) {
 				invalid = append(invalid, tok)
 				if f.log != nil {
-					f.log.Warn("fcm invalid token", "token", maskToken(tok), "error", r.Error.Error())
+					f.log.Warn("fcm invalid token")
 				}
 			} else {
 				if f.log != nil {
-					f.log.Warn("fcm send failure", "token", maskToken(tok), "error", r.Error)
+					f.log.Warn("fcm send failure")
 				}
 			}
 		}
@@ -209,21 +214,33 @@ func isInvalidTokenError(err error) bool {
 		strings.Contains(s, "invalid-registration")
 }
 
-func maskToken(tok string) string {
-	if len(tok) <= 8 {
-		return "***"
-	}
-	return tok[:4] + "..." + tok[len(tok)-4:]
-}
-
 // Send push helper for server
 
 func (s *Server) triggerPushForMessage(senderID, conversationID, messageID string, members []string) {
 	if s.pusher == nil || s.pushStore == nil {
 		return
 	}
-	// Don't block caller; run async with background context
-	go s.sendPushForMessage(context.Background(), senderID, conversationID, messageID, members)
+	if _, disabled := s.pusher.(*noopPusher); disabled {
+		return
+	}
+	job := pushJob{senderID: senderID, conversationID: conversationID, messageID: messageID, members: members}
+	if s.pushQueue == nil {
+		go s.sendPushForMessage(context.Background(), job.senderID, job.conversationID, job.messageID, job.members)
+		return
+	}
+	select {
+	case s.pushQueue <- job:
+	default:
+		if s.log != nil {
+			s.log.Warn("push queue full, notification skipped", "conversation", conversationID)
+		}
+	}
+}
+
+func (s *Server) pushLoop() {
+	for job := range s.pushQueue {
+		s.sendPushForMessage(context.Background(), job.senderID, job.conversationID, job.messageID, job.members)
+	}
 }
 
 func (s *Server) sendPushForMessage(ctx context.Context, senderID, conversationID, messageID string, members []string) {
@@ -237,11 +254,6 @@ func (s *Server) sendPushForMessage(ctx context.Context, senderID, conversationI
 	if len(recipients) == 0 {
 		return
 	}
-	// Fetch sender display name for title
-	displayName := s.fetchSenderDisplayName(ctx, senderID)
-	if displayName == "" {
-		displayName = "Yeni mesaj"
-	}
 	body := "Yeni bir mesajın var"
 	data := map[string]string{
 		"type":           "new_message",
@@ -253,6 +265,8 @@ func (s *Server) sendPushForMessage(ctx context.Context, senderID, conversationI
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
+	tokens := make([]string, 0)
+	seen := make(map[string]struct{})
 	for _, recipient := range recipients {
 		devices, err := s.pushStore.ListByAccount(ctx, recipient)
 		if err != nil {
@@ -264,34 +278,36 @@ func (s *Server) sendPushForMessage(ctx context.Context, senderID, conversationI
 		if len(devices) == 0 {
 			continue
 		}
-		var tokens []string
 		for _, d := range devices {
-			if d.Token != "" {
+			if _, exists := seen[d.Token]; d.Token != "" && !exists {
 				tokens = append(tokens, d.Token)
+				seen[d.Token] = struct{}{}
 			}
 		}
-		if len(tokens) == 0 {
-			continue
-		}
-		invalid, err := s.pusher.Send(ctx, tokens, displayName, body, data)
-		if err != nil {
+	}
+	if len(tokens) == 0 {
+		return
+	}
+	// Avoid this account lookup when no recipient has an active device.
+	displayName := s.fetchSenderDisplayName(ctx, senderID)
+	if displayName == "" {
+		displayName = "Yeni mesaj"
+	}
+	invalid, err := s.pusher.Send(ctx, tokens, displayName, body, data)
+	if err != nil && s.log != nil {
+		s.log.Error("push: send failed", "sender", senderID, "conversation", conversationID)
+	}
+	if len(invalid) > 0 {
+		if err := s.pushStore.DeleteByTokens(ctx, invalid); err != nil {
 			if s.log != nil {
-				s.log.Error("push: send failed", "recipient", recipient, "sender", senderID, "conversation", conversationID, "error", err)
+				s.log.Error("push: delete invalid tokens failed", "error", err, "invalidCount", len(invalid))
 			}
-			// still attempt to clean invalid if any
+		} else if s.log != nil {
+			s.log.Info("push: deleted invalid tokens", "count", len(invalid))
 		}
-		if len(invalid) > 0 {
-			if err := s.pushStore.DeleteByTokens(ctx, invalid); err != nil {
-				if s.log != nil {
-					s.log.Error("push: delete invalid tokens failed", "recipient", recipient, "error", err, "invalidCount", len(invalid))
-				}
-			} else if s.log != nil {
-				s.log.Info("push: deleted invalid tokens", "recipient", recipient, "count", len(invalid))
-			}
-		}
-		if err == nil && s.log != nil {
-			s.log.Info("push: sent", "recipient", recipient, "tokens", len(tokens), "invalid", len(invalid), "conversation", conversationID, "message", messageID)
-		}
+	}
+	if err == nil && s.log != nil {
+		s.log.Info("push: sent", "tokens", len(tokens), "invalid", len(invalid), "conversation", conversationID, "message", messageID)
 	}
 }
 

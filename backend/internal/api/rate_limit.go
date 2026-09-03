@@ -30,6 +30,16 @@ type messageRateLimiter interface {
 	Check(ctx context.Context, account, clientId string) (allowed bool, isDuplicate bool, retryAfter int, blockedUntil time.Time, err error)
 }
 
+type messageDedupForgetter interface {
+	Forget(context.Context, string, string)
+}
+
+func (s *Server) forgetMessageDedup(ctx context.Context, account, clientID string) {
+	if limiter, ok := s.limiter.(messageDedupForgetter); ok {
+		limiter.Forget(ctx, account, clientID)
+	}
+}
+
 // memoryMessageRateLimiter keeps the hot message path independent from the
 // remote database. The service currently runs as one Railway replica, so this
 // gives constant-time rate limiting and idempotency without a network round
@@ -38,6 +48,17 @@ type memoryMessageRateLimiter struct {
 	mu       sync.Mutex
 	accounts map[string]*memoryMessageRateState
 	now      func() time.Time
+}
+
+func (l *memoryMessageRateLimiter) Forget(_ context.Context, account, clientID string) {
+	if clientID == "" {
+		return
+	}
+	l.mu.Lock()
+	if state := l.accounts[account]; state != nil {
+		delete(state.dedup, clientID)
+	}
+	l.mu.Unlock()
 }
 
 type memoryMessageRateState struct {
@@ -118,6 +139,13 @@ type surrealRateLimiter struct {
 	db  queryer
 	log *slog.Logger
 	now func() time.Time
+}
+
+func (l *surrealRateLimiter) Forget(ctx context.Context, account, clientID string) {
+	if clientID == "" {
+		return
+	}
+	_ = l.db.Query(ctx, "DELETE type::record($dedupId)", map[string]any{"dedupId": dedupRecordID(account, clientID)}, nil)
 }
 
 type rateStateRow struct {

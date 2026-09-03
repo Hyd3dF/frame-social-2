@@ -524,8 +524,8 @@ func TestPushMultipleDevicesAllNotified(t *testing.T) {
 
 	srv.sendPushForMessage(context.Background(), "account:alice", "conversation:group1", "message:multi", []string{"account:alice", "account:bob", "account:carol"})
 	calls := mockP.Calls()
-	if len(calls) != 2 {
-		t.Fatalf("expected 2 calls (bob and carol) got %d", len(calls))
+	if len(calls) != 1 {
+		t.Fatalf("expected one batched call got %d", len(calls))
 	}
 	// Collect token counts
 	totalTokens := 0
@@ -661,6 +661,17 @@ func TestPushIntegrationViaSendMessage(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("payload not correct %+v", calls)
+	}
+}
+
+func TestPushQueueSaturationDoesNotBlockMessageDelivery(t *testing.T) {
+	srv := newPushTestServer(newPushMockDB(), &mockPusher{})
+	srv.pushQueue = make(chan pushJob, 1)
+	srv.pushQueue <- pushJob{}
+	start := time.Now()
+	srv.triggerPushForMessage("account:alice", "conversation:abc", "message:one", []string{"account:alice", "account:bob"})
+	if time.Since(start) > 50*time.Millisecond {
+		t.Fatal("a full push queue must not block message delivery")
 	}
 }
 
