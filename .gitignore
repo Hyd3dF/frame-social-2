@@ -1,0 +1,26 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.crt
+credentials/
+secrets/
+# Firebase Admin SDK (must never be committed)
+*firebase-adminsdk*.json
+*serviceAccount*.json
+serviceAccountKey.json
+
+# Build and test output
+bin/
+build/
+coverage.out
+*.test
+*.log
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
