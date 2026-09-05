@@ -8,7 +8,7 @@ func (s *Server) listGroupMembers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var members []groupMemberView
-	err := s.db.Query(r.Context(), `SELECT <string>in.id AS id, in.full_name AS fullName, in.display_name AS displayName, in.username AS username, in.avatar.public_url AS avatarUrl, false AS isPrivate, 'none' AS relationship, role AS role
+	err := s.db.Query(r.Context(), `SELECT <string>in.id AS id, in.full_name AS fullName, in.display_name AS displayName, in.username AS username, in.avatar.public_url AS avatarUrl, false AS isPrivate, 'none' AS relationship, role AS role, joined_at AS joinedAt
 		FROM conversation_member WHERE out = type::record($group) AND left_at IS NONE ORDER BY role, joined_at LIMIT 500;`, map[string]any{"group": group}, &members)
 	if err != nil {
 		s.databaseError(w, "list group members", err)

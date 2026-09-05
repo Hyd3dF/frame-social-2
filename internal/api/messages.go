@@ -214,6 +214,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.persist == nil {
+		w.Header().Set("Retry-After", "5")
 		respondError(w, http.StatusServiceUnavailable, "service_unavailable", "Servis geçici olarak kullanılamıyor.")
 		return
 	}
@@ -225,6 +226,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 			if s.log != nil {
 				s.log.Error("message rate limit check failed", "account", acct, "error", err)
 			}
+			w.Header().Set("Retry-After", "5")
 			respondError(w, http.StatusServiceUnavailable, "service_unavailable", "Servis geçici olarak kullanılamıyor.")
 			return
 		}
@@ -290,6 +292,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 	// bounded persistence slot. Saturation is rejected before acknowledgement.
 	if !s.persist.accept(&job, &view) {
 		s.forgetMessageDedup(r.Context(), acct, input.ClientID)
+		w.Header().Set("Retry-After", "5")
 		respondError(w, http.StatusServiceUnavailable, "service_unavailable", "Servis geçici olarak kullanılamıyor.")
 		return
 	}

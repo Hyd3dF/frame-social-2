@@ -196,7 +196,7 @@ func (m *integrationMockDB) Query(ctx context.Context, sql string, vars map[stri
 	}
 
 	// doPersist for sendMessage - CREATE $mid CONTENT with conversation, sender, client_id
-	if strings.Contains(sql, "CREATE ONLY $mid CONTENT") && strings.Contains(sql, "conversation: type::record") {
+	if strings.Contains(sql, "CREATE ONLY type::record($mid) CONTENT") && strings.Contains(sql, "conversation: type::record") {
 		mid, _ := vars["mid"].(string)
 		conv, _ := vars["conversation"].(string)
 		sender, _ := vars["sender"].(string)

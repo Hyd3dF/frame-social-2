@@ -146,15 +146,25 @@ func (s *groupStore) joinRequest(ctx context.Context, group, account string) (st
 	return result[0].ID, nil
 }
 
-func (s *groupStore) ensureSchema(ctx context.Context) {
-	for _, query := range []string{
-		"DEFINE TABLE IF NOT EXISTS group_invitation SCHEMALESS",
-		"DEFINE TABLE IF NOT EXISTS group_join_request SCHEMALESS",
-	} {
-		_ = s.db.Query(ctx, query, nil, nil)
-	}
+func (s *groupStore) ensureSchema(ctx context.Context) error {
+	// conversation and conversation_member are SCHEMAFULL in production. Keep
+	// group-specific fields in the shared conversation model, but declare them
+	// before any group request can use them. The role definition predates groups
+	// and must be widened to accept the owner role.
+	return s.db.Query(ctx, `
+DEFINE FIELD IF NOT EXISTS group_id ON conversation TYPE none | string;
+DEFINE FIELD IF NOT EXISTS group_name ON conversation TYPE none | string;
+DEFINE FIELD IF NOT EXISTS group_description ON conversation TYPE none | string;
+DEFINE FIELD IF NOT EXISTS group_image_url ON conversation TYPE none | string;
+DEFINE FIELD IF NOT EXISTS group_privacy ON conversation TYPE none | string ASSERT $value = NONE OR $value INSIDE ['public', 'private'];
+DEFINE FIELD IF NOT EXISTS group_join_rule ON conversation TYPE none | string ASSERT $value = NONE OR $value INSIDE ['open', 'invite', 'approval', 'password'];
+DEFINE FIELD IF NOT EXISTS group_password_hash ON conversation TYPE none | string;
+DEFINE FIELD OVERWRITE role ON conversation_member TYPE string DEFAULT 'member' ASSERT $value INSIDE ['member', 'admin', 'owner'];
+DEFINE TABLE IF NOT EXISTS group_invitation SCHEMALESS;
+DEFINE TABLE IF NOT EXISTS group_join_request SCHEMALESS;
+`, nil, nil)
 }
 
-func startGroupSchema(db queryer) {
-	go newGroupStore(db).ensureSchema(context.Background())
+func startGroupSchema(db queryer) error {
+	return newGroupStore(db).ensureSchema(context.Background())
 }

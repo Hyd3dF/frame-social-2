@@ -127,7 +127,7 @@ LET $removed = array::len($deletion) > 0 AND $deletion[0].mode = 'everyone';
 IF $removed = false {
 LET $existing = SELECT * FROM type::record($mid) LIMIT 1;
 IF array::len($existing) = 0 {
- LET $msg = CREATE ONLY $mid CONTENT {
+ LET $msg = CREATE ONLY type::record($mid) CONTENT {
    conversation: type::record($conversation), sender: type::record($sender),
    client_id: <string>$client_id, body: IF $retracted THEN NONE ELSE $body END,
    kind: IF $retracted THEN 'deleted' ELSE 'text' END, created_at: <datetime>$createdAt,

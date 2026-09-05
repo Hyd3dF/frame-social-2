@@ -47,7 +47,9 @@ func New(cfg config.Config, db *database.Client, logger *slog.Logger) http.Handl
 	server.persist = newPersister(db, pending, members, logger)
 	server.limiter = newMemoryMessageRateLimiter()
 	server.messageDeletion = newMessageDeletionStore(db)
-	startGroupSchema(db)
+	if err := startGroupSchema(db); err != nil {
+		logger.Error("group schema initialization failed", "error", err)
+	}
 	server.pushStore = newPushStore(db, logger)
 	server.pusher = initPusher(cfg, logger)
 	if _, disabled := server.pusher.(*noopPusher); !disabled {
@@ -68,6 +70,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	if err := s.db.Ping(ctx); err != nil {
 		s.log.Error("database health check failed", "error", err)
+		w.Header().Set("Retry-After", "5")
 		respondError(w, http.StatusServiceUnavailable, "service_unavailable", "Servis geçici olarak kullanılamıyor.")
 		return
 	}

@@ -466,7 +466,7 @@ func (m *testSocialDB) Query(ctx context.Context, sql string, vars map[string]an
 		return nil
 	}
 	// doPersist
-	if strings.Contains(sql, "CREATE ONLY $mid CONTENT") {
+	if strings.Contains(sql, "CREATE ONLY type::record($mid) CONTENT") {
 		return nil
 	}
 	// account deletion transaction

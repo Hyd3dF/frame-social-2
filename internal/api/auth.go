@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -306,7 +307,11 @@ func (s *Server) createSession(ctx context.Context, account string, input verify
 
 func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 	var input tokenRequest
-	if !decode(w, r, &input) || input.RefreshToken == "" {
+	if !decode(w, r, &input) {
+		return
+	}
+	if input.RefreshToken == "" {
+		respondError(w, http.StatusBadRequest, "invalid_request", "Gönderilen bilgiler geçersiz.")
 		return
 	}
 	newRefresh, err := security.RefreshToken()
@@ -314,26 +319,28 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, "rotate refresh token", err)
 		return
 	}
-	var sessions []struct {
-		Account   string `json:"account"`
-		ExpiresAt string `json:"expiresAt"`
-	}
+	var sessions []refreshSessionRow
+	// NOTE: deployed SurrealDB only accepts bare RETURN AFTER on UPDATE.
+	// Projection form `RETURN AFTER { ... }` fails with:
+	//   Parse error: Unexpected token `{`, expected Eof.
+	// Bare RETURN AFTER keeps the rotation atomic (single conditional
+	// UPDATE) and works on all SurrealDB 1.x/2.x servers.
 	err = s.db.Query(r.Context(), `UPDATE auth_session SET
 refresh_token_hash = $new_hash, last_used_at = time::now()
 WHERE refresh_token_hash = $old_hash AND revoked_at IS NONE AND expires_at > time::now()
-RETURN AFTER { account: <string>account, expiresAt: <string>expires_at };`, map[string]any{
+RETURN AFTER`, map[string]any{
 		"old_hash": security.TokenHash(input.RefreshToken), "new_hash": security.TokenHash(newRefresh),
 	}, &sessions)
 	if err != nil {
 		s.databaseError(w, "refresh session", err)
 		return
 	}
-	if len(sessions) == 0 || sessions[0].Account == "" ||
-		!validRecord(sessions[0].Account, "account") {
+	if len(sessions) == 0 || sessions[0].accountID() == "" ||
+		!validRecord(sessions[0].accountID(), "account") {
 		respondError(w, http.StatusUnauthorized, "invalid_refresh_token", "Oturum yenileme anahtarı geçersiz.")
 		return
 	}
-	account := sessions[0].Account
+	account := sessions[0].accountID()
 	access, err := security.AccessToken(s.cfg.JWTSecret, account, s.cfg.AccessTokenMinutes)
 	if err != nil {
 		s.internalError(w, "create access token", err)
@@ -345,7 +352,7 @@ RETURN AFTER { account: <string>account, expiresAt: <string>expires_at };`, map[
 		s.internalError(w, "verify access token", fmt.Errorf("minted access token failed validation"))
 		return
 	}
-	respondJSON(w, http.StatusOK, security.Tokens{AccessToken: access, RefreshToken: newRefresh, RefreshTokenExpiresAt: sessions[0].ExpiresAt})
+	respondJSON(w, http.StatusOK, security.Tokens{AccessToken: access, RefreshToken: newRefresh, RefreshTokenExpiresAt: sessions[0].expiresAt()})
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
@@ -369,4 +376,81 @@ func (s *Server) databaseError(w http.ResponseWriter, operation string, err erro
 func (s *Server) internalError(w http.ResponseWriter, operation string, err error) {
 	s.log.Error("internal operation failed", "operation", operation, "error", err)
 	respondError(w, http.StatusInternalServerError, "internal_error", "Beklenmeyen bir hata oluştu.")
+}
+
+// refreshSessionRow decodes one auth_session document from bare RETURN AFTER.
+// Real DB returns snake_case (expires_at); older mocks return expiresAt.
+type refreshSessionRow struct {
+	Account        recordString `json:"account"`
+	ExpiresAt      string       `json:"expires_at"`
+	ExpiresAtCamel string       `json:"expiresAt"`
+}
+
+func (r refreshSessionRow) accountID() string { return string(r.Account) }
+
+func (r refreshSessionRow) expiresAt() string {
+	if r.ExpiresAt != "" {
+		return r.ExpiresAt
+	}
+	return r.ExpiresAtCamel
+}
+
+// recordString accepts SurrealDB record IDs as "table:id" strings or as
+// {"tb":"table","id":...} objects (id may be string/number/object).
+type recordString string
+
+func (r *recordString) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*r = recordString(s)
+		return nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return err
+	}
+	tb, _ := obj["tb"].(string)
+	if tb == "" {
+		tb, _ = obj["table"].(string)
+	}
+	idStr := stringifyRecordIDPart(obj["id"])
+	if tb != "" && idStr != "" {
+		*r = recordString(tb + ":" + idStr)
+		return nil
+	}
+	return fmt.Errorf("invalid record id")
+}
+
+func stringifyRecordIDPart(v any) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return t
+	case float64:
+		if t == float64(int64(t)) {
+			return fmt.Sprintf("%d", int64(t))
+		}
+		return fmt.Sprintf("%v", t)
+	case map[string]any:
+		for _, k := range []string{"String", "string", "Uuid", "uuid", "Int", "int", "id"} {
+			if sv, ok := t[k].(string); ok && sv != "" {
+				return sv
+			}
+			if fv, ok := t[k].(float64); ok {
+				if fv == float64(int64(fv)) {
+					return fmt.Sprintf("%d", int64(fv))
+				}
+				return fmt.Sprintf("%v", fv)
+			}
+		}
+		if len(t) == 1 {
+			for _, vv := range t {
+				return stringifyRecordIDPart(vv)
+			}
+		}
+		return ""
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }

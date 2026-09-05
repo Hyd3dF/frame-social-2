@@ -26,6 +26,40 @@ type groupMockDB struct {
 	joinLookup    map[string]string
 	blocked       map[string]bool
 	conversations map[string]string // id -> kind
+	membersQuery  string
+}
+
+type groupSchemaCaptureDB struct {
+	queries []string
+}
+
+func (d *groupSchemaCaptureDB) Ping(context.Context) error { return nil }
+
+func (d *groupSchemaCaptureDB) Query(_ context.Context, sql string, _ map[string]any, _ any) error {
+	d.queries = append(d.queries, sql)
+	return nil
+}
+
+func TestGroupSchemaSupportsProductionSchemafullTables(t *testing.T) {
+	db := &groupSchemaCaptureDB{}
+	if err := newGroupStore(db).ensureSchema(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	all := strings.Join(db.queries, "\n")
+	for _, required := range []string{
+		"group_id ON conversation",
+		"group_name ON conversation",
+		"group_description ON conversation",
+		"group_image_url ON conversation",
+		"group_privacy ON conversation",
+		"group_join_rule ON conversation",
+		"group_password_hash ON conversation",
+		"['member', 'admin', 'owner']",
+	} {
+		if !strings.Contains(all, required) {
+			t.Fatalf("group schema is missing %q", required)
+		}
+	}
 }
 
 func newGroupMockDB() *groupMockDB {
@@ -359,6 +393,7 @@ func (m *groupMockDB) Query(_ context.Context, sql string, vars map[string]any, 
 	}
 	// list members
 	if strings.Contains(sql, "FROM conversation_member WHERE out = type::record($group)") && strings.Contains(sql, "SELECT <string>in.id") {
+		m.membersQuery = sql
 		g, _ := vars["group"].(string)
 		var out []groupMemberView
 		if members, ok := m.members[g]; ok {
@@ -849,6 +884,9 @@ func TestGroupMembersAndOwnership(t *testing.T) {
 	handler.ServeHTTP(w, req)
 	if w.Code != 200 {
 		t.Fatalf("list %d %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(db.membersQuery, "joined_at AS joinedAt") {
+		t.Fatal("members query must select joined_at before ordering by it for strict SurrealDB")
 	}
 	// non-member cannot list
 	req = httptest.NewRequest("GET", "/v1/groups/g1/members", nil)

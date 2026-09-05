@@ -57,7 +57,7 @@ func TestPersistUsesIdempotentTransaction(t *testing.T) {
 	if err := p.DoPersist(context.Background(), newPersistJob("conversation:one", "account:one", "body", "client-12345678", "")); err != nil {
 		t.Fatalf("persist: %v", err)
 	}
-	for _, fragment := range []string{"BEGIN TRANSACTION", "SELECT * FROM type::record($mid)", "CREATE ONLY $mid CONTENT", "COMMIT TRANSACTION"} {
+	for _, fragment := range []string{"BEGIN TRANSACTION", "SELECT * FROM type::record($mid)", "CREATE ONLY type::record($mid) CONTENT", "COMMIT TRANSACTION"} {
 		if !strings.Contains(query, fragment) {
 			t.Fatalf("persist query missing %q", fragment)
 		}
@@ -77,5 +77,37 @@ func TestPersistAdmissionOrdersMessageTimestamps(t *testing.T) {
 	}
 	if !second.createdAt.After(first.createdAt) || secondView.CreatedAt <= firstView.CreatedAt {
 		t.Fatalf("timestamps are not ordered: %s then %s", firstView.CreatedAt, secondView.CreatedAt)
+	}
+}
+
+// TestPersistUsesDeployedCompatibleCreate replays the production outage where
+// every persist failed: the deployed SurrealDB rejects CREATE with a bare
+// string variable (CREATE ONLY $mid) — record IDs must go through
+// type::record($mid), the idiom used everywhere else in this codebase.
+func TestPersistUsesDeployedCompatibleCreate(t *testing.T) {
+	p := &persister{
+		db: &mockQueryer{onQuery: func(sql string, vars map[string]any, dest any) error {
+			// Emulate the deployed parser: a bare $variable in CREATE
+			// position is not a table/record reference.
+			for _, line := range strings.Split(sql, "\n") {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "CREATE ONLY $") || strings.HasPrefix(trimmed, "CREATE $") {
+					t.Errorf("persist query rejected by deployed SurrealDB: %q", trimmed)
+					return context.DeadlineExceeded // any error aborts DoPersist
+				}
+			}
+			return nil
+		}},
+		pending: newPendingStore(),
+	}
+	job := newPersistJob("conversation:one", "account:one", "body", "client-12345678", "")
+	if !p.pending.TryAppend(job.conversation, messageView{ID: job.messageID}) {
+		t.Fatal("setup: pending append failed")
+	}
+	if err := p.DoPersist(context.Background(), job); err != nil {
+		t.Fatalf("persist against deployed parser rules: %v", err)
+	}
+	if got := p.pending.List("conversation:one"); len(got) != 0 {
+		t.Fatalf("persisted job must leave pending, got %d", len(got))
 	}
 }
