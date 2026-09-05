@@ -16,6 +16,7 @@ import (
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger.Info("API starting", "commit", commitSHA())
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("configuration failed", "error", err)
@@ -34,7 +35,7 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("API listening", "address", cfg.HTTPAddr, "environment", cfg.AppEnv)
+		logger.Info("API listening", "address", cfg.HTTPAddr, "environment", cfg.AppEnv, "commit", commitSHA())
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("HTTP server failed", "error", err)
 			os.Exit(1)
@@ -49,4 +50,13 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
 	}
+}
+
+// commitSHA reports the deployed git revision. Railway injects
+// RAILWAY_GIT_COMMIT_SHA at runtime; "unknown" means local/dev build.
+func commitSHA() string {
+	if sha := os.Getenv("RAILWAY_GIT_COMMIT_SHA"); sha != "" {
+		return sha
+	}
+	return "unknown"
 }

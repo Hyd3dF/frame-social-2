@@ -100,7 +100,7 @@ func (p *persister) persistWithRetry(job persistJob) {
 		if err == nil {
 			return
 		}
-		p.log.Error("persist failed, retrying", "attempt", attempt, "conversation", job.conversation, "error", err)
+		p.log.Error("persist failed, retrying", "attempt", attempt, "conversation", job.conversation, "message", job.messageID, "error", err)
 		select {
 		case <-time.After(backoff):
 		}

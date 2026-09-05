@@ -106,9 +106,9 @@ func (c *Client) Query(ctx context.Context, sql string, vars map[string]any, des
 	if len(statements) == 0 {
 		return errors.New("surreal returned no statements")
 	}
-	for _, statement := range statements {
+	for i, statement := range statements {
 		if statement.Status != "OK" {
-			return fmt.Errorf("surreal query failed: %s", string(statement.Result))
+			return fmt.Errorf("surreal query failed: statement %d/%d status %q result %s", i, len(statements), statement.Status, string(statement.Result))
 		}
 	}
 	if destination == nil {
