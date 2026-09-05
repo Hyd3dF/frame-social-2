@@ -885,8 +885,8 @@ func TestGroupMembersAndOwnership(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("list %d %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(db.membersQuery, "joined_at AS joinedAt") {
-		t.Fatal("members query must select joined_at before ordering by it for strict SurrealDB")
+	if !strings.Contains(db.membersQuery, "joined_at AS joinedAt") || !strings.Contains(db.membersQuery, "ORDER BY role, joinedAt") {
+		t.Fatal("members query must select joined_at AS joinedAt and order by the alias for strict SurrealDB")
 	}
 	// non-member cannot list
 	req = httptest.NewRequest("GET", "/v1/groups/g1/members", nil)
